@@ -86,15 +86,15 @@ export function Depth({ market }: {market: string}) {
     return <div>
         <TableHeader />
         {asks && <AskTable asks={asks} />}
-        {price && <div>{price}</div>}
+        {price && <div className="text-md">{price}</div>}
         {bids && <BidTable bids={bids} />}
     </div>
 }
 
 function TableHeader() {
-    return <div className="flex justify-between text-xs">
-    <div className="text-white">Price</div>
-    <div className="text-slate-500">Size</div>
-    <div className="text-slate-500">Total</div>
+    return <div className="flex justify-between text-sm">
+    <div className="text-white text-2xl font-medium p-2">Price</div>
+    <div className="text-slate-500 text-2xl font-medium p-2">Size</div>
+    <div className="text-slate-500 text-2xl font-medium p-2">Total</div>
 </div>
 }

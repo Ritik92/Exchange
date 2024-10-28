@@ -19,6 +19,7 @@ function Bid({ price, quantity, total, maxTotal }: { price: string, quantity: st
                 width: "100%",
                 backgroundColor: "transparent",
                 overflow: "hidden",
+                marginBottom:4,
             }}
         >
         <div
@@ -32,14 +33,14 @@ function Bid({ price, quantity, total, maxTotal }: { price: string, quantity: st
             transition: "width 0.3s ease-in-out",
             }}
         ></div>
-            <div className={`flex justify-between text-xs w-full`}>
+            <div className={`flex justify-between text-sm w-full`}>
                 <div>
                     {price}
                 </div>
                 <div>
                     {quantity}
                 </div>
-                <div>
+                <div className="text-green-800">
                     {total.toFixed(2)}
                 </div>
             </div>

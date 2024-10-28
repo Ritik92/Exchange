@@ -19,6 +19,8 @@ function Ask({price, quantity, total, maxTotal}: {price: string, quantity: strin
         width: "100%",
         backgroundColor: "transparent",
         overflow: "hidden",
+        marginBottom:4,
+        
     }}
 >
     <div
@@ -32,14 +34,14 @@ function Ask({price, quantity, total, maxTotal}: {price: string, quantity: strin
         transition: "width 0.3s ease-in-out",
         }}
     ></div>
-    <div className="flex justify-between text-xs w-full">
+    <div className="flex justify-between text-sm w-full">
         <div>
             {price}
         </div>
         <div>
             {quantity}
         </div>
-        <div>
+        <div className="text-red-800">
             {total?.toFixed(2)}
         </div>
     </div>

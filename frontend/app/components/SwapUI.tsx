@@ -1,6 +1,5 @@
 "use client";
 import { useState } from "react";
-
 export function SwapUI({ market }: {market: string}) {
     const [amount, setAmount] = useState('');
     const [activeTab, setActiveTab] = useState('buy');
@@ -35,7 +34,7 @@ export function SwapUI({ market }: {market: string}) {
                                 <input step="0.01" placeholder="0" className="h-12 rounded-lg border-2 border-solid border-baseBorderLight bg-[var(--background)] pr-12 text-right text-2xl leading-9 text-[$text] placeholder-baseTextMedEmphasis ring-0 transition focus:border-accentBlue focus:ring-0" type="text" value="134.38" />
                                 <div className="flex flex-row absolute right-1 top-1 p-2">
                                     <div className="relative">
-                                        <img src="/usdc.webp" className="w-6 h-6" />
+                                        <img src="https://backpack.exchange/_next/image?url=%2Fcoins%2Fusdc.png&w=48&q=75" className="w-6 h-6" />
                                     </div>
                                 </div>
                             </div>
@@ -49,7 +48,7 @@ export function SwapUI({ market }: {market: string}) {
                             <input step="0.01" placeholder="0" className="h-12 rounded-lg border-2 border-solid border-baseBorderLight bg-[var(--background)] pr-12 text-right text-2xl leading-9 text-[$text] placeholder-baseTextMedEmphasis ring-0 transition focus:border-accentBlue focus:ring-0" type="text" value="123" />
                             <div className="flex flex-row absolute right-1 top-1 p-2">
                                 <div className="relative">
-                                    <img src="/sol.webp" className="w-6 h-6" />
+                                    <img src="https://backpack.exchange/_next/image?url=%2Fcoins%2Fsol.png&w=48&q=75" className="w-6 h-6" />
                                 </div>
                             </div>
                         </div>
@@ -71,7 +70,8 @@ export function SwapUI({ market }: {market: string}) {
                             </div>
                         </div>
                     </div>
-                    <button type="button" className="font-semibold  focus:ring-blue-200 focus:none focus:outline-none text-center h-12 rounded-xl text-base px-4 py-2 my-4 bg-greenPrimaryButtonBackground text-greenPrimaryButtonText active:scale-98" data-rac="">Buy</button>
+                    {activeTab=='buy'? <button type="button" className="font-semibold  focus:ring-blue-200 focus:none focus:outline-none text-center h-12 rounded-xl text-base px-4 py-2 my-4 bg-greenPrimaryButtonBackground text-greenPrimaryButtonText active:scale-98" data-rac="">Buy</button>: <button type="button" className="font-semibold  focus:ring-blue-200 focus:none focus:outline-none text-center h-12 rounded-xl text-base px-4 py-2 my-4 bg-red-500 text-greenPrimaryButtonText active:scale-98" data-rac="">Sell</button>}
+                   
                     <div className="flex justify-between flex-row mt-1">
                         <div className="flex flex-row gap-2">
                             <div className="flex items-center">
