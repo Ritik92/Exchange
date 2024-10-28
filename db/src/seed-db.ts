@@ -11,20 +11,32 @@ const client = new Client({
 async function initializeDB() {
     await client.connect();
 
+    // First drop the materialized views
+    await client.query(`
+        DROP MATERIALIZED VIEW IF EXISTS klines_1m;
+        DROP MATERIALIZED VIEW IF EXISTS klines_1h;
+        DROP MATERIALIZED VIEW IF EXISTS klines_1w;
+    `);
+
+    // Then drop and recreate the main table
     await client.query(`
         DROP TABLE IF EXISTS "tata_prices";
         CREATE TABLE "tata_prices"(
             time            TIMESTAMP WITH TIME ZONE NOT NULL,
-            price   DOUBLE PRECISION,
-            volume      DOUBLE PRECISION,
-            currency_code   VARCHAR (10)
+            price          DOUBLE PRECISION,
+            volume         DOUBLE PRECISION,
+            currency_code  VARCHAR(10)
         );
-        
-        SELECT create_hypertable('tata_prices', 'time', 'price', 2);
     `);
 
+    // Create the hypertable
     await client.query(`
-        CREATE MATERIALIZED VIEW IF NOT EXISTS klines_1m AS
+        SELECT create_hypertable('tata_prices', 'time');
+    `);
+
+    // Recreate the materialized views
+    await client.query(`
+        CREATE MATERIALIZED VIEW klines_1m AS
         SELECT
             time_bucket('1 minute', time) AS bucket,
             first(price, time) AS open,
@@ -38,7 +50,7 @@ async function initializeDB() {
     `);
 
     await client.query(`
-        CREATE MATERIALIZED VIEW IF NOT EXISTS klines_1h AS
+        CREATE MATERIALIZED VIEW klines_1h AS
         SELECT
             time_bucket('1 hour', time) AS bucket,
             first(price, time) AS open,
@@ -52,7 +64,7 @@ async function initializeDB() {
     `);
 
     await client.query(`
-        CREATE MATERIALIZED VIEW IF NOT EXISTS klines_1w AS
+        CREATE MATERIALIZED VIEW klines_1w AS
         SELECT
             time_bucket('1 week', time) AS bucket,
             first(price, time) AS open,
