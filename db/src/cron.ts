@@ -1,19 +1,20 @@
-import { Client } from 'pg'; 
+const { Client } = require('pg');
 
-const client = new Client({
+
+const cl = new Client({
     user: 'your_user',
     host: 'localhost',
     database: 'my_database',
     password: 'your_password',
     port: 5432,
 });
-client.connect();
+cl.connect();
 
 async function refreshViews() {
 
-    await client.query('REFRESH MATERIALIZED VIEW klines_1m');
-    await client.query('REFRESH MATERIALIZED VIEW klines_1h');
-    await client.query('REFRESH MATERIALIZED VIEW klines_1w');
+    await cl.query('REFRESH MATERIALIZED VIEW klines_1m');
+    await cl.query('REFRESH MATERIALIZED VIEW klines_1h');
+    await cl.query('REFRESH MATERIALIZED VIEW klines_1w');
 
     console.log("Materialized views refreshed successfully");
 }
