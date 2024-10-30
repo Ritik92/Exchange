@@ -3,6 +3,7 @@ import { MarketBar } from "@/app/components/MarketBar";
 import { SwapUI } from "@/app/components/SwapUI";
 import { TradeView } from "@/app/components/TradeView";
 import { Depth } from "@/app/components/depth/Depth";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { useParams } from "next/navigation";
 
 export default function Page() {
@@ -11,11 +12,14 @@ export default function Page() {
         <div className="flex flex-col flex-1">
             <MarketBar market={market as string} />
             <div className="flex flex-row h-[920px] border-y border-slate-800">
-                <div className="flex flex-col flex-1">
+                <div className=" flex-1 ">
                     <TradeView market={market as string} />
                 </div>
-                <div className="flex flex-col w-[250px] overflow-auto p-1">
-                    <Depth market={market as string} /> 
+                <div className="flex flex-col  h-1/2 w-1/4  overflow-auto pb-6  ">
+                <ScrollArea className="hide-scrollbar">
+                <Depth market={market as string} /> 
+                </ScrollArea>
+                    
                 </div>
             </div>
         </div>
