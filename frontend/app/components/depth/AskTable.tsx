@@ -19,7 +19,7 @@ function Ask({price, quantity, total, maxTotal}: {price: string, quantity: strin
         width: "100%",
         backgroundColor: "transparent",
         overflow: "hidden",
-        marginBottom:4,
+        marginBottom:2,
         height:20
         
     }}

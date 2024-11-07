@@ -33,3 +33,27 @@ export async function getKlines(market: string, interval: string, startTime: num
     const data: KLine[] = response.data;
     return data.sort((x, y) => (Number(x.end) < Number(y.end) ? -1 : 1));
 }
+export async function buy(price:any,quantity:any) {
+    const response = await axios.post(`${BASE_URL}/order`,{
+        
+            "market":"TATA_INR",
+            "quantity":quantity,
+            "price":price,
+            "side":"buy",
+            "userId":"1" 
+    });
+    console.log(response)
+    return response.data;
+}
+export async function sell(price:any,quantity:any) {
+    const response = await axios.post(`${BASE_URL}/order`,{
+        
+            "market":"TATA_INR",
+            "quantity":quantity,
+            "price":price,
+            "side":"sell",
+            "userId":"5" 
+    });
+    console.log(response)
+    return response.data;
+}

@@ -1,0 +1,4783 @@
+
+
+// ================ .\script.py ================
+
+import os
+import glob
+
+def combine_all_code(root_directory, output_file):
+    # List of common code file extensions
+    code_extensions = {
+        '.py', '.js', '.java', '.cpp', '.c', '.h', '.css', '.html', 
+        '.php', '.rb', '.swift', '.go', '.ts', '.jsx', '.tsx'
+    }
+    
+    # Folders to ignore
+    ignore_folders = {
+        'node_modules',
+        'venv',
+        '.next',
+        'env',
+        'dist',
+        'build',
+        '__pycache__',
+        '.git',
+        'vendor',
+        'packages'
+    }
+
+    with open(output_file, 'w', encoding='utf-8') as outfile:
+        # Walk through directory
+        for root, dirs, files in os.walk(root_directory):
+            # Remove ignored folders from dirs list
+            dirs[:] = [d for d in dirs if d not in ignore_folders]
+            
+            # Process files in current directory
+            for file in files:
+                filepath = os.path.join(root, file)
+                # Check if file extension is a code file
+                if os.path.splitext(file)[1].lower() in code_extensions:
+                    try:
+                        # Write file path as header
+                        outfile.write(f'\n\n// ================ {filepath} ================\n\n')
+                        
+                        # Read and write content
+                        with open(filepath, 'r', encoding='utf-8') as infile:
+                            outfile.write(infile.read())
+                    except Exception as e:
+                        outfile.write(f'// Error reading file {filepath}: {str(e)}\n')
+
+# Usage
+root_dir = "."  # Use "." for current directory or provide specific path
+output = "all_code.txt"  # Output file name
+
+print("Starting to combine code files...")
+combine_all_code(root_dir, output)
+print(f"Finished! Check {output} for the combined code.")
+
+// ================ .\api\src\index.ts ================
+
+import express from "express";
+import cors from "cors";
+import { orderRouter } from "./routes/order";
+import { depthRouter } from "./routes/depth";
+import { tradesRouter } from "./routes/trades";
+import { klineRouter } from "./routes/kline";
+import { tickersRouter } from "./routes/ticker";
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+app.use("/api/v1/order", orderRouter);
+app.use("/api/v1/depth", depthRouter);
+app.use("/api/v1/trades", tradesRouter);
+app.use("/api/v1/klines", klineRouter);
+app.use("/api/v1/tickers", tickersRouter);
+
+
+app.listen(3000, () => {
+    console.log("Server is running on port 3000");
+});
+
+// ================ .\api\src\RedisManager.ts ================
+
+
+import { RedisClientType, createClient } from "redis";
+import { MessageFromOrderbook } from "./types";
+import { MessageToEngine } from "./types/to";
+
+export class RedisManager {
+    private client: RedisClientType;
+    private publisher: RedisClientType;
+    private static instance: RedisManager;
+
+    private constructor() {
+        this.client = createClient();
+        this.client.connect();
+        this.publisher = createClient();
+        this.publisher.connect();
+    }
+
+    public static getInstance() {
+        if (!this.instance)  {
+            this.instance = new RedisManager();
+        }
+        return this.instance;
+    }
+
+    public sendAndAwait(message: MessageToEngine) {
+        return new Promise<MessageFromOrderbook>((resolve) => {
+            const id = this.getRandomClientId();
+            this.client.subscribe(id, (message) => {
+                this.client.unsubscribe(id);
+                resolve(JSON.parse(message));
+            });
+            this.publisher.lPush("messages", JSON.stringify({ clientId: id, message }));
+        });
+    }
+
+    public getRandomClientId() {
+        return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+    }
+
+}
+
+// ================ .\api\src\routes\depth.ts ================
+
+
+import { Router } from "express";
+import { RedisManager } from "../RedisManager";
+import { GET_DEPTH } from "../types";
+
+export const depthRouter = Router();
+
+depthRouter.get("/", async (req, res) => {
+    const { symbol } = req.query;
+    const response = await RedisManager.getInstance().sendAndAwait({
+        type: GET_DEPTH,
+        data: {
+            market: symbol as string
+        }
+    });
+
+    res.json(response.payload);
+});
+
+
+// ================ .\api\src\routes\kline.ts ================
+
+import { Client } from 'pg';
+import { Router } from "express";
+import { RedisManager } from "../RedisManager";
+
+const pgClient = new Client({
+    user: 'your_user',
+    host: 'localhost',
+    database: 'my_database',
+    password: 'your_password',
+    port: 5432,
+});
+pgClient.connect();
+
+export const klineRouter = Router();
+
+klineRouter.get("/", async (req, res) => {
+    const { market, interval, startTime, endTime } = req.query;
+
+    let query;
+    switch (interval) {
+        case '1m':
+            query = `SELECT * FROM klines_1m WHERE bucket >= $1 AND bucket <= $2`;
+            break;
+        case '1h':
+            query = `SELECT * FROM klines_1m WHERE  bucket >= $1 AND bucket <= $2`;
+            break;
+        case '1w':
+            query = `SELECT * FROM klines_1w WHERE bucket >= $1 AND bucket <= $2`;
+            break;
+        default:
+            return res.status(400).send('Invalid interval');
+    }
+
+    try {
+        //@ts-ignore
+        const result = await pgClient.query(query, [new Date(startTime * 1000 as string), new Date(endTime * 1000 as string)]);
+        res.json(result.rows.map(x => ({
+            close: x.close,
+            end: x.bucket,
+            high: x.high,
+            low: x.low,
+            open: x.open,
+            quoteVolume: x.quoteVolume,
+            start: x.start,
+            trades: x.trades,
+            volume: x.volume,
+        })));
+    } catch (err) {
+        console.log(err);
+        res.status(500).send(err);
+    }
+});
+
+// ================ .\api\src\routes\order.ts ================
+
+import { Router } from "express";
+import { RedisManager } from "../RedisManager";
+import { CREATE_ORDER, CANCEL_ORDER, ON_RAMP, GET_OPEN_ORDERS } from "../types";
+
+export const orderRouter = Router();
+
+orderRouter.post("/", async (req, res) => {
+    const { market, price, quantity, side, userId } = req.body;
+    console.log({ market, price, quantity, side, userId })
+    //TODO: can u make the type of the response object right? Right now it is a union.
+    const response = await RedisManager.getInstance().sendAndAwait({
+        type: CREATE_ORDER,
+        data: {
+            market,
+            price,
+            quantity,
+            side,
+            userId
+        }
+    });
+    res.json(response.payload);
+});
+
+orderRouter.delete("/", async (req, res) => {
+    const { orderId, market } = req.body;
+    const response = await RedisManager.getInstance().sendAndAwait({
+        type: CANCEL_ORDER,
+        data: {
+            orderId,
+            market
+        }
+    });
+    res.json(response.payload);
+});
+
+orderRouter.get("/open", async (req, res) => {
+    const response = await RedisManager.getInstance().sendAndAwait({
+        type: GET_OPEN_ORDERS,
+        data: {
+            userId: req.query.userId as string,
+            market: req.query.market as string
+        }
+    });
+    res.json(response.payload);
+});
+
+// ================ .\api\src\routes\ticker.ts ================
+
+
+import { Router } from "express";
+
+export const tickersRouter = Router();
+
+tickersRouter.get("/", async (req, res) => {    
+    res.json({});
+});
+
+// ================ .\api\src\routes\trades.ts ================
+
+import { Router } from "express";
+
+export const tradesRouter = Router();
+
+tradesRouter.get("/", async (req, res) => {
+    const { market } = req.query;
+    // get from DB
+    res.json({});
+})
+
+
+// ================ .\api\src\types\index.js ================
+
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.GET_DEPTH = exports.ON_RAMP = exports.CANCEL_ORDER = exports.CREATE_ORDER = void 0;
+exports.CREATE_ORDER = "CREATE_ORDER";
+exports.CANCEL_ORDER = "CANCEL_ORDER";
+exports.ON_RAMP = "ON_RAMP";
+exports.GET_DEPTH = "GET_DEPTH";
+
+
+// ================ .\api\src\types\index.ts ================
+
+
+export const CREATE_ORDER = "CREATE_ORDER";
+export const CANCEL_ORDER = "CANCEL_ORDER";
+export const ON_RAMP = "ON_RAMP";
+export const GET_OPEN_ORDERS = "GET_OPEN_ORDERS";
+
+export const GET_DEPTH = "GET_DEPTH";
+
+export type MessageFromOrderbook = {
+    type: "DEPTH",
+    payload: {
+        market: string,
+        bids: [string, string][],
+        asks: [string, string][],
+    }
+} | {
+    type: "ORDER_PLACED",
+    payload: {
+        orderId: string,
+        executedQty: number,
+        fills: [
+            {
+                price: string,
+                qty: number,
+                tradeId: number
+            }
+        ]
+    }
+} | {
+    type: "ORDER_CANCELLED",
+    payload: {
+        orderId: string,
+        executedQty: number,
+        remainingQty: number
+    }
+} | {
+    type: "OPEN_ORDERS",
+    payload: {
+        orderId: string,
+        executedQty: number,
+        price: string,
+        quantity: string,
+        side: "buy" | "sell",
+        userId: string
+    }[]
+}
+
+// ================ .\api\src\types\to.js ================
+
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+
+
+// ================ .\api\src\types\to.ts ================
+
+import { CANCEL_ORDER, CREATE_ORDER, GET_DEPTH, GET_OPEN_ORDERS, ON_RAMP } from "."
+
+export type MessageToEngine = {
+    type: typeof CREATE_ORDER,
+    data: {
+        market: string,
+        price: string,
+        quantity: string,
+        side: "buy" | "sell",
+        userId: string
+    }
+} | {
+    type: typeof CANCEL_ORDER,
+    data: {
+        orderId: string,
+        market: string,
+    }
+} | {
+    type: typeof ON_RAMP,
+    data: {
+        amount: string,
+        userId: string,
+        txnId: string
+    }
+} | {
+    type: typeof GET_DEPTH,
+    data: {
+        market: string,
+    }
+} | {
+    type: typeof GET_OPEN_ORDERS,
+    data: {
+        userId: string,
+        market: string,
+    }
+}
+
+// ================ .\db\src\cron.ts ================
+
+const { Client } = require('pg');
+
+
+const cl = new Client({
+    user: 'your_user',
+    host: 'localhost',
+    database: 'my_database',
+    password: 'your_password',
+    port: 5432,
+});
+cl.connect();
+
+async function refreshViews() {
+
+    await cl.query('REFRESH MATERIALIZED VIEW klines_1m');
+    await cl.query('REFRESH MATERIALIZED VIEW klines_1h');
+    await cl.query('REFRESH MATERIALIZED VIEW klines_1w');
+
+    console.log("Materialized views refreshed successfully");
+}
+
+refreshViews().catch(console.error);
+
+setInterval(() => {
+    refreshViews()
+}, 1000 * 10 );
+
+// ================ .\db\src\index.ts ================
+
+import { Client } from 'pg';
+import { createClient } from 'redis';  
+import { DbMessage } from './types';
+
+const pgClient = new Client({
+    user: 'your_user',
+    host: 'localhost',
+    database: 'my_database',
+    password: 'your_password',
+    port: 5432,
+});
+pgClient.connect();
+
+async function main() {
+    const redisClient = createClient();
+    await redisClient.connect();
+    console.log("connected to redis");
+
+    while (true) {
+        const response = await redisClient.rPop("db_processor" as string)
+        if (!response) {
+
+        }  else {
+            const data: DbMessage = JSON.parse(response);
+            if (data.type === "TRADE_ADDED") {
+                console.log("adding data");
+                console.log(data);
+                const price = data.data.price;
+                const timestamp = new Date(data.data.timestamp);
+                const query = 'INSERT INTO tata_prices (time, price) VALUES ($1, $2)';
+                // TODO: How to add volume?
+                const values = [timestamp, price];
+                await pgClient.query(query, values);
+            }
+        }
+    }
+
+}
+
+main();
+
+// ================ .\db\src\seed-db.ts ================
+
+// const { Client } = require('pg');
+
+// const client = new Client({
+//     user: 'your_user',
+//     host: 'localhost',
+//     database: 'my_database',
+//     password: 'your_password',
+//     port: 5432,
+// });
+
+// async function initializeDB() {
+//     await client.connect();
+
+//     // First drop the materialized views
+//     await client.query(`
+//         DROP MATERIALIZED VIEW IF EXISTS klines_1m;
+//         DROP MATERIALIZED VIEW IF EXISTS klines_1h;
+//         DROP MATERIALIZED VIEW IF EXISTS klines_1w;
+//     `);
+
+//     // Then drop and recreate the main table
+//     await client.query(`
+//         DROP TABLE IF EXISTS "tata_prices";
+//         CREATE TABLE "tata_prices"(
+//             time            TIMESTAMP WITH TIME ZONE NOT NULL,
+//             price          DOUBLE PRECISION,
+//             volume         DOUBLE PRECISION,
+//             currency_code  VARCHAR(10)
+//         );
+//     `);
+
+//     // Create the hypertable
+//     await client.query(`
+//         SELECT create_hypertable('tata_prices', 'time');
+//     `);
+
+//     // Recreate the materialized views
+//     await client.query(`
+//         CREATE MATERIALIZED VIEW klines_1m AS
+//         SELECT
+//             time_bucket('1 minute', time) AS bucket,
+//             first(price, time) AS open,
+//             max(price) AS high,
+//             min(price) AS low,
+//             last(price, time) AS close,
+//             sum(volume) AS volume,
+//             currency_code
+//         FROM tata_prices
+//         GROUP BY bucket, currency_code;
+//     `);
+
+//     await client.query(`
+//         CREATE MATERIALIZED VIEW klines_1h AS
+//         SELECT
+//             time_bucket('1 hour', time) AS bucket,
+//             first(price, time) AS open,
+//             max(price) AS high,
+//             min(price) AS low,
+//             last(price, time) AS close,
+//             sum(volume) AS volume,
+//             currency_code
+//         FROM tata_prices
+//         GROUP BY bucket, currency_code;
+//     `);
+
+//     await client.query(`
+//         CREATE MATERIALIZED VIEW klines_1w AS
+//         SELECT
+//             time_bucket('1 week', time) AS bucket,
+//             first(price, time) AS open,
+//             max(price) AS high,
+//             min(price) AS low,
+//             last(price, time) AS close,
+//             sum(volume) AS volume,
+//             currency_code
+//         FROM tata_prices
+//         GROUP BY bucket, currency_code;
+//     `);
+
+//     await client.end();
+//     console.log("Database initialized successfully");
+// }
+
+// initializeDB().catch(console.error);
+
+// ================ .\db\src\types.ts ================
+
+export type DbMessage = {
+    type: "TRADE_ADDED",
+    data: {
+        id: string,
+        isBuyerMaker: boolean,
+        price: string,
+        quantity: string,
+        quoteQuantity: string,
+        timestamp: number,
+        market: string
+    }
+} | {
+    type: "ORDER_UPDATE",
+    data: {
+        orderId: string,
+        executedQty: number,
+        market?: string,
+        price?: string,
+        quantity?: string,
+        side?: "buy" | "sell",
+    }
+}
+
+
+// ================ .\engine\src\index.ts ================
+
+import { createClient, } from "redis";
+import { Engine } from "./trade/Engine";
+
+
+async function main() {
+    const engine = new Engine(); 
+    const redisClient = createClient();
+    await redisClient.connect();
+    console.log("connected to redis");
+
+    while (true) {
+        const response = await redisClient.rPop("messages" as string)
+        if (!response) {
+
+        }  else {
+            engine.process(JSON.parse(response));
+        }        
+    }
+
+}
+
+main();
+
+// ================ .\engine\src\RedisManager.ts ================
+
+import { DEPTH_UPDATE, TICKER_UPDATE } from "./trade/events";
+import { RedisClientType, createClient } from "redis";
+import { ORDER_UPDATE, TRADE_ADDED } from "./types";
+import { WsMessage } from "./types/toWs";
+import { MessageToApi } from "./types/toApi";
+
+type DbMessage = {
+    type: typeof TRADE_ADDED,
+    data: {
+        id: string,
+        isBuyerMaker: boolean,
+        price: string,
+        quantity: string,
+        quoteQuantity: string,
+        timestamp: number,
+        market: string
+    }
+} | {
+    type: typeof ORDER_UPDATE,
+    data: {
+        orderId: string,
+        executedQty: number,
+        market?: string,
+        price?: string,
+        quantity?: string,
+        side?: "buy" | "sell",
+    }
+}
+
+export class RedisManager {
+    private client: RedisClientType;
+    private static instance: RedisManager;
+
+    constructor() {
+        this.client = createClient();
+        this.client.connect();
+    }
+
+    public static getInstance() {
+        if (!this.instance)  {
+            this.instance = new RedisManager();
+        }
+        return this.instance;
+    }
+  
+    public pushMessage(message: DbMessage) {
+        this.client.lPush("db_processor", JSON.stringify(message));
+    }
+
+    public publishMessage(channel: string, message: WsMessage) {
+        this.client.publish(channel, JSON.stringify(message));
+    }
+
+    public sendToApi(clientId: string, message: MessageToApi) {
+        this.client.publish(clientId, JSON.stringify(message));
+    }
+}
+
+// ================ .\engine\src\tests\engine.test.ts ================
+
+import { describe, expect, it, vi } from "vitest";
+import { Engine } from "../trade/Engine";
+import { RedisManager } from "../RedisManager";
+import { CREATE_ORDER } from "../types/fromApi";
+
+vi.mock("../RedisManager", () => ({
+    RedisManager: {
+      getInstance: () => ({
+        publishMessage: vi.fn(),
+        sendToApi: vi.fn(),
+        pushMessage: vi.fn()
+      })
+    }
+}));
+
+
+describe("Engine", () => {
+    //TODO: How to test the singleton class RedisManager directly?
+    it("Publishes Trade updates", () => {
+        const engine = new Engine();
+        const publishSpy = vi.spyOn(engine, "publishWsTrades");
+        engine.process({
+            message: {
+                type: CREATE_ORDER,
+                data: {
+                    market: "TATA_INR",
+                    price: "1000",
+                    quantity: "1",
+                    side: "buy",
+                    userId: "1"
+                }
+            },
+            clientId: "1"
+        });
+
+        engine.process({
+            message: {
+                type: CREATE_ORDER,
+                data: {
+                    market: "TATA_INR",
+                    price: "1001",
+                    quantity: "1",
+                    side: "sell",
+                    userId: "2"
+                }
+            },
+            clientId: "1"
+        });
+        
+        expect(publishSpy).toHaveBeenCalledTimes(2);
+
+    });
+});
+
+// ================ .\engine\src\tests\orderbook.test.ts ================
+
+import { describe, expect, it } from "vitest";
+import { Orderbook } from "../trade/Orderbook";
+
+describe("Simple orders", () => {
+    it("Empty orderbook should not be filled", () => {
+        const orderbook = new Orderbook("TATA", [], [], 0, 0);
+        const order = {
+            price: 1000,
+            quantity: 1,
+            orderId: "1",
+            filled: 0,
+            side: "buy" as ("buy" | "sell"),
+            userId: "1"
+        };
+        const { fills, executedQty } = orderbook.addOrder(order);
+        expect(fills.length).toBe(0);
+        expect(executedQty).toBe(0);
+    });
+
+    it("Can be partially filled", () => {
+        const orderbook = new Orderbook("TATA", [{
+            price: 1000,
+            quantity: 1,
+            orderId: "1",
+            filled: 0,
+            side: "buy" as ("buy" | "sell"),
+            userId: "1"
+        }], [], 0, 0);
+
+        const order = {
+            price: 1000,
+            quantity: 2,
+            orderId: "2",
+            filled: 0,
+            side: "sell" as ("buy" | "sell"),
+            userId: "2"
+        };
+
+        const { fills, executedQty } = orderbook.addOrder(order);
+        expect(fills.length).toBe(1);
+        expect(executedQty).toBe(1);
+    });
+
+    it("Can be partially filled", () => {
+        const orderbook = new Orderbook("TATA", [{
+            price: 999,
+            quantity: 1,
+            orderId: "1",
+            filled: 0,
+            side: "buy" as ("buy" | "sell"),
+            userId: "1"
+        }],
+        [{
+            price: 1001,
+            quantity: 1,
+            orderId: "2",
+            filled: 0,
+            side: "sell" as ("buy" | "sell"),
+            userId: "2"
+        }], 0, 0);
+
+        const order = {
+            price: 1001,
+            quantity: 2,
+            orderId: "3",
+            filled: 0,
+            side: "buy" as ("buy" | "sell"),
+            userId: "3"
+        };
+
+        const { fills, executedQty } = orderbook.addOrder(order);
+        expect(fills.length).toBe(1);
+        expect(executedQty).toBe(1);
+        expect(orderbook.bids.length).toBe(2);
+        expect(orderbook.asks.length).toBe(0);
+    });
+});
+
+describe("Self trade prevention", () => {
+    it.todo("User cant self trade", () => { 
+        const orderbook = new Orderbook("TATA", [{
+            price: 999,
+            quantity: 1,
+            orderId: "1",
+            filled: 0,
+            side: "buy" as ("buy" | "sell"),
+            userId: "1"
+        }],
+        [{
+            price: 1001,
+            quantity: 1,
+            orderId: "2",
+            filled: 0,
+            side: "sell" as ("buy" | "sell"),
+            userId: "2"
+        }], 0, 0);
+
+        const order = {
+            price: 999,
+            quantity: 2,
+            orderId: "3",
+            filled: 0,
+            side: "sell" as ("buy" | "sell"),
+            userId: "3"
+        };
+
+        const { fills, executedQty } = orderbook.addOrder(order);
+        expect(fills.length).toBe(0);
+        expect(executedQty).toBe(0);
+    });
+
+});
+
+describe("Precission errors are taken care of", () => {
+    // This does succeed right now as well, but can be flaky based on how long the decimals are
+    it.todo("Bid doesnt persist even with decimals", () => {
+        const orderbook = new Orderbook("TATA", [{
+            price: 999,
+            quantity: 0.551123,
+            orderId: "1",
+            filled: 0,
+            side: "buy" as ("buy" | "sell"),
+            userId: "1"
+        }],
+        [{
+            price: 1001,
+            quantity: 0.551,
+            orderId: "2",
+            filled: 0,
+            side: "sell" as ("buy" | "sell"),
+            userId: "2"
+        }], 0, 0);
+
+        const order = {
+            price: 999,
+            quantity: 0.551123,
+            orderId: "3",
+            filled: 0,
+            side: "sell" as ("buy" | "sell"),
+            userId: "3"
+        };
+
+        const { fills, executedQty } = orderbook.addOrder(order);
+        expect(fills.length).toBe(1);
+        expect(orderbook.bids.length).toBe(0);
+        expect(orderbook.asks.length).toBe(1);
+    }); 
+});
+
+// ================ .\engine\src\trade\Engine.ts ================
+
+import fs from "fs";
+import { RedisManager } from "../RedisManager";
+import { ORDER_UPDATE, TRADE_ADDED } from "../types/index";
+import { CANCEL_ORDER, CREATE_ORDER, GET_DEPTH, GET_OPEN_ORDERS, MessageFromApi, ON_RAMP } from "../types/fromApi";
+import { Fill, Order, Orderbook } from "./Orderbook";
+
+//TODO: Avoid floats everywhere, use a decimal similar to the PayTM project for every currency
+export const BASE_CURRENCY = "INR";
+
+interface UserBalance {
+    [key: string]: {
+        available: number;
+        locked: number;
+    }
+}
+
+export class Engine {
+    private orderbooks: Orderbook[] = [];
+    private balances: Map<string, UserBalance> = new Map();
+
+    constructor() {
+        let snapshot = null
+        try {
+            if (process.env.WITH_SNAPSHOT) {
+                snapshot = fs.readFileSync("./snapshot.json");
+            }
+        } catch (e) {
+            console.log("No snapshot found");
+        }
+
+        if (snapshot) {
+            const snapshotSnapshot = JSON.parse(snapshot.toString());
+            this.orderbooks = snapshotSnapshot.orderbooks.map((o: any) => new Orderbook(o.baseAsset, o.bids, o.asks, o.lastTradeId, o.currentPrice));
+            this.balances = new Map(snapshotSnapshot.balances);
+        } else {
+            this.orderbooks = [new Orderbook(`TATA`, [], [], 0, 0)];
+            this.setBaseBalances();
+        }
+        setInterval(() => {
+            this.saveSnapshot();
+        }, 1000 * 3);
+    }
+
+    saveSnapshot() {
+        const snapshotSnapshot = {
+            orderbooks: this.orderbooks.map(o => o.getSnapshot()),
+            balances: Array.from(this.balances.entries())
+        }
+        fs.writeFileSync("./snapshot.json", JSON.stringify(snapshotSnapshot));
+    }
+
+    process({ message, clientId }: {message: MessageFromApi, clientId: string}) {
+        switch (message.type) {
+            case CREATE_ORDER:
+                try {
+                    const { executedQty, fills, orderId } = this.createOrder(message.data.market, message.data.price, message.data.quantity, message.data.side, message.data.userId);
+                    RedisManager.getInstance().sendToApi(clientId, {
+                        type: "ORDER_PLACED",
+                        payload: {
+                            orderId,
+                            executedQty,
+                            fills
+                        }
+                    });
+                } catch (e) {
+                    console.log(e);
+                    RedisManager.getInstance().sendToApi(clientId, {
+                        type: "ORDER_CANCELLED",
+                        payload: {
+                            orderId: "",
+                            executedQty: 0,
+                            remainingQty: 0
+                        }
+                    });
+                }
+                break;
+            case CANCEL_ORDER:
+                try {
+                    const orderId = message.data.orderId;
+                    const cancelMarket = message.data.market;
+                    const cancelOrderbook = this.orderbooks.find(o => o.ticker() === cancelMarket);
+                    const quoteAsset = cancelMarket.split("_")[1];
+                    if (!cancelOrderbook) {
+                        throw new Error("No orderbook found");
+                    }
+
+                    const order = cancelOrderbook.asks.find(o => o.orderId === orderId) || cancelOrderbook.bids.find(o => o.orderId === orderId);
+                    if (!order) {
+                        console.log("No order found");
+                        throw new Error("No order found");
+                    }
+
+                    if (order.side === "buy") {
+                        const price = cancelOrderbook.cancelBid(order)
+                        const leftQuantity = (order.quantity - order.filled) * order.price;
+                        //@ts-ignore
+                        this.balances.get(order.userId)[BASE_CURRENCY].available += leftQuantity;
+                        //@ts-ignore
+                        this.balances.get(order.userId)[BASE_CURRENCY].locked -= leftQuantity;
+                        if (price) {
+                            this.sendUpdatedDepthAt(price.toString(), cancelMarket);
+                        }
+                    } else {
+                        const price = cancelOrderbook.cancelAsk(order)
+                        const leftQuantity = order.quantity - order.filled;
+                        //@ts-ignore
+                        this.balances.get(order.userId)[quoteAsset].available += leftQuantity;
+                        //@ts-ignore
+                        this.balances.get(order.userId)[quoteAsset].locked -= leftQuantity;
+                        if (price) {
+                            this.sendUpdatedDepthAt(price.toString(), cancelMarket);
+                        }
+                    }
+
+                    RedisManager.getInstance().sendToApi(clientId, {
+                        type: "ORDER_CANCELLED",
+                        payload: {
+                            orderId,
+                            executedQty: 0,
+                            remainingQty: 0
+                        }
+                    });
+                    
+                } catch (e) {
+                    console.log("Error hwile cancelling order", );
+                    console.log(e);
+                }
+                break;
+            case GET_OPEN_ORDERS:
+                try {
+                    const openOrderbook = this.orderbooks.find(o => o.ticker() === message.data.market);
+                    if (!openOrderbook) {
+                        throw new Error("No orderbook found");
+                    }
+                    const openOrders = openOrderbook.getOpenOrders(message.data.userId);
+
+                    RedisManager.getInstance().sendToApi(clientId, {
+                        type: "OPEN_ORDERS",
+                        payload: openOrders
+                    }); 
+                } catch(e) {
+                    console.log(e);
+                }
+                break;
+            case ON_RAMP:
+                const userId = message.data.userId;
+                const amount = Number(message.data.amount);
+                this.onRamp(userId, amount);
+                break;
+            case GET_DEPTH:
+                try {
+                    const market = message.data.market;
+                    const orderbook = this.orderbooks.find(o => o.ticker() === market);
+                    if (!orderbook) {
+                        throw new Error("No orderbook found");
+                    }
+                    RedisManager.getInstance().sendToApi(clientId, {
+                        type: "DEPTH",
+                        payload: orderbook.getDepth()
+                    });
+                } catch (e) {
+                    console.log(e);
+                    RedisManager.getInstance().sendToApi(clientId, {
+                        type: "DEPTH",
+                        payload: {
+                            bids: [],
+                            asks: []
+                        }
+                    });
+                }
+                break;
+        }
+    }
+
+    addOrderbook(orderbook: Orderbook) {
+        this.orderbooks.push(orderbook);
+    }
+
+    createOrder(market: string, price: string, quantity: string, side: "buy" | "sell", userId: string) {
+
+        const orderbook = this.orderbooks.find(o => o.ticker() === market)
+        const baseAsset = market.split("_")[0];
+        const quoteAsset = market.split("_")[1];
+
+        if (!orderbook) {
+            throw new Error("No orderbook found");
+        }
+
+        this.checkAndLockFunds(baseAsset, quoteAsset, side, userId, quoteAsset, price, quantity);
+
+        const order: Order = {
+            price: Number(price),
+            quantity: Number(quantity),
+            orderId: Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15),
+            filled: 0,
+            side,
+            userId
+        }
+        
+        const { fills, executedQty } = orderbook.addOrder(order);
+        this.updateBalance(userId, baseAsset, quoteAsset, side, fills, executedQty);
+
+        this.createDbTrades(fills, market, userId);
+        this.updateDbOrders(order, executedQty, fills, market);
+        this.publisWsDepthUpdates(fills, price, side, market);
+        this.publishWsTrades(fills, userId, market);
+        return { executedQty, fills, orderId: order.orderId };
+    }
+
+    updateDbOrders(order: Order, executedQty: number, fills: Fill[], market: string) {
+        RedisManager.getInstance().pushMessage({
+            type: ORDER_UPDATE,
+            data: {
+                orderId: order.orderId,
+                executedQty: executedQty,
+                market: market,
+                price: order.price.toString(),
+                quantity: order.quantity.toString(),
+                side: order.side,
+            }
+        });
+
+        fills.forEach(fill => {
+            RedisManager.getInstance().pushMessage({
+                type: ORDER_UPDATE,
+                data: {
+                    orderId: fill.markerOrderId,
+                    executedQty: fill.qty
+                }
+            });
+        });
+    }
+
+    createDbTrades(fills: Fill[], market: string, userId: string) {
+        fills.forEach(fill => {
+            RedisManager.getInstance().pushMessage({
+                type: TRADE_ADDED,
+                data: {
+                    market: market,
+                    id: fill.tradeId.toString(),
+                    isBuyerMaker: fill.otherUserId === userId, // TODO: Is this right?
+                    price: fill.price,
+                    quantity: fill.qty.toString(),
+                    quoteQuantity: (fill.qty * Number(fill.price)).toString(),
+                    timestamp: Date.now()
+                }
+            });
+        });
+    }
+
+    publishWsTrades(fills: Fill[], userId: string, market: string) {
+        fills.forEach(fill => {
+            RedisManager.getInstance().publishMessage(`trade@${market}`, {
+                stream: `trade@${market}`,
+                data: {
+                    e: "trade",
+                    t: fill.tradeId,
+                    m: fill.otherUserId === userId, // TODO: Is this right?
+                    p: fill.price,
+                    q: fill.qty.toString(),
+                    s: market,
+                }
+            });
+        });
+    }
+
+    sendUpdatedDepthAt(price: string, market: string) {
+        const orderbook = this.orderbooks.find(o => o.ticker() === market);
+        if (!orderbook) {
+            return;
+        }
+        const depth = orderbook.getDepth();
+        const updatedBids = depth?.bids.filter(x => x[0] === price);
+        const updatedAsks = depth?.asks.filter(x => x[0] === price);
+        
+        RedisManager.getInstance().publishMessage(`depth@${market}`, {
+            stream: `depth@${market}`,
+            data: {
+                a: updatedAsks.length ? updatedAsks : [[price, "0"]],
+                b: updatedBids.length ? updatedBids : [[price, "0"]],
+                e: "depth"
+            }
+        });
+    }
+
+    publisWsDepthUpdates(fills: Fill[], price: string, side: "buy" | "sell", market: string) {
+        const orderbook = this.orderbooks.find(o => o.ticker() === market);
+        if (!orderbook) {
+            return;
+        }
+        const depth = orderbook.getDepth();
+        if (side === "buy") {
+            const updatedAsks = depth?.asks.filter(x => fills.map(f => f.price).includes(x[0].toString()));
+            const updatedBid = depth?.bids.find(x => x[0] === price);
+            console.log("publish ws depth updates")
+            RedisManager.getInstance().publishMessage(`depth@${market}`, {
+                stream: `depth@${market}`,
+                data: {
+                    a: updatedAsks,
+                    b: updatedBid ? [updatedBid] : [],
+                    e: "depth"
+                }
+            });
+        }
+        if (side === "sell") {
+           const updatedBids = depth?.bids.filter(x => fills.map(f => f.price).includes(x[0].toString()));
+           const updatedAsk = depth?.asks.find(x => x[0] === price);
+           console.log("publish ws depth updates")
+           RedisManager.getInstance().publishMessage(`depth@${market}`, {
+               stream: `depth@${market}`,
+               data: {
+                   a: updatedAsk ? [updatedAsk] : [],
+                   b: updatedBids,
+                   e: "depth"
+               }
+           });
+        }
+    }
+
+    updateBalance(userId: string, baseAsset: string, quoteAsset: string, side: "buy" | "sell", fills: Fill[], executedQty: number) {
+        if (side === "buy") {
+            fills.forEach(fill => {
+                // Update quote asset balance
+                //@ts-ignore
+                this.balances.get(fill.otherUserId)[quoteAsset].available = this.balances.get(fill.otherUserId)?.[quoteAsset].available + (fill.qty * fill.price);
+
+                //@ts-ignore
+                this.balances.get(userId)[quoteAsset].locked = this.balances.get(userId)?.[quoteAsset].locked - (fill.qty * fill.price);
+
+                // Update base asset balance
+
+                //@ts-ignore
+                this.balances.get(fill.otherUserId)[baseAsset].locked = this.balances.get(fill.otherUserId)?.[baseAsset].locked - fill.qty;
+
+                //@ts-ignore
+                this.balances.get(userId)[baseAsset].available = this.balances.get(userId)?.[baseAsset].available + fill.qty;
+
+            });
+            
+        } else {
+            fills.forEach(fill => {
+                // Update quote asset balance
+                //@ts-ignore
+                this.balances.get(fill.otherUserId)[quoteAsset].locked = this.balances.get(fill.otherUserId)?.[quoteAsset].locked - (fill.qty * fill.price);
+
+                //@ts-ignore
+                this.balances.get(userId)[quoteAsset].available = this.balances.get(userId)?.[quoteAsset].available + (fill.qty * fill.price);
+
+                // Update base asset balance
+
+                //@ts-ignore
+                this.balances.get(fill.otherUserId)[baseAsset].available = this.balances.get(fill.otherUserId)?.[baseAsset].available + fill.qty;
+
+                //@ts-ignore
+                this.balances.get(userId)[baseAsset].locked = this.balances.get(userId)?.[baseAsset].locked - (fill.qty);
+
+            });
+        }
+    }
+
+    checkAndLockFunds(baseAsset: string, quoteAsset: string, side: "buy" | "sell", userId: string, asset: string, price: string, quantity: string) {
+        if (side === "buy") {
+            if ((this.balances.get(userId)?.[quoteAsset]?.available || 0) < Number(quantity) * Number(price)) {
+                throw new Error("Insufficient funds");
+            }
+            //@ts-ignore
+            this.balances.get(userId)[quoteAsset].available = this.balances.get(userId)?.[quoteAsset].available - (Number(quantity) * Number(price));
+            
+            //@ts-ignore
+            this.balances.get(userId)[quoteAsset].locked = this.balances.get(userId)?.[quoteAsset].locked + (Number(quantity) * Number(price));
+        } else {
+            if ((this.balances.get(userId)?.[baseAsset]?.available || 0) < Number(quantity)) {
+                throw new Error("Insufficient funds");
+            }
+            //@ts-ignore
+            this.balances.get(userId)[baseAsset].available = this.balances.get(userId)?.[baseAsset].available - (Number(quantity));
+            
+            //@ts-ignore
+            this.balances.get(userId)[baseAsset].locked = this.balances.get(userId)?.[baseAsset].locked + Number(quantity);
+        }
+    }
+
+    onRamp(userId: string, amount: number) {
+        const userBalance = this.balances.get(userId);
+        if (!userBalance) {
+            this.balances.set(userId, {
+                [BASE_CURRENCY]: {
+                    available: amount,
+                    locked: 0
+                }
+            });
+        } else {
+            userBalance[BASE_CURRENCY].available += amount;
+        }
+    }
+
+    setBaseBalances() {
+        this.balances.set("1", {
+            [BASE_CURRENCY]: {
+                available: 10000000,
+                locked: 0
+            },
+            "TATA": {
+                available: 10000000,
+                locked: 0
+            }
+        });
+
+        this.balances.set("2", {
+            [BASE_CURRENCY]: {
+                available: 10000000,
+                locked: 0
+            },
+            "TATA": {
+                available: 10000000,
+                locked: 0
+            }
+        });
+
+        this.balances.set("5", {
+            [BASE_CURRENCY]: {
+                available: 10000000,
+                locked: 0
+            },
+            "TATA": {
+                available: 10000000,
+                locked: 0
+            }
+        });
+    }
+
+}
+
+// ================ .\engine\src\trade\events.ts ================
+
+
+export const DEPTH_UPDATE = "DEPTH_UPDATE";
+export const TICKER_UPDATE = "TICKER_UPDATE";
+
+// ================ .\engine\src\trade\Orderbook.ts ================
+
+import { BASE_CURRENCY } from "./Engine";
+
+export interface Order {
+    price: number;
+    quantity: number;
+    orderId: string;
+    filled: number;
+    side: "buy" | "sell";
+    userId: string;
+}
+
+export interface Fill {
+    price: string;
+    qty: number;
+    tradeId: number;
+    otherUserId: string;
+    markerOrderId: string;
+}
+
+export class Orderbook {
+    bids: Order[];
+    asks: Order[];
+    baseAsset: string;
+    quoteAsset: string = BASE_CURRENCY;
+    lastTradeId: number;
+    currentPrice: number;
+
+    constructor(baseAsset: string, bids: Order[], asks: Order[], lastTradeId: number, currentPrice: number) {
+        this.bids = bids;
+        this.asks = asks;
+        this.baseAsset = baseAsset;
+        this.lastTradeId = lastTradeId || 0;
+        this.currentPrice = currentPrice ||0;
+    }
+
+    ticker() {
+        return `${this.baseAsset}_${this.quoteAsset}`;
+    }
+
+    getSnapshot() {
+        return {
+            baseAsset: this.baseAsset,
+            bids: this.bids,
+            asks: this.asks,
+            lastTradeId: this.lastTradeId,
+            currentPrice: this.currentPrice
+        }
+    }
+
+    //TODO: Add self trade prevention
+    addOrder(order: Order): {
+        executedQty: number,
+        fills: Fill[]
+    } {
+        if (order.side === "buy") {
+            const {executedQty, fills} = this.matchBid(order); 
+            order.filled = executedQty;
+            if (executedQty === order.quantity) {
+                return {
+                    executedQty,
+                    fills
+                }
+            }
+            this.bids.push(order);
+            return {
+                executedQty,
+                fills
+            }
+        } else {
+            const {executedQty, fills} = this.matchAsk(order);
+            order.filled = executedQty;
+            if (executedQty === order.quantity) {
+                return {
+                    executedQty,
+                    fills
+                }
+            }
+            this.asks.push(order);
+            return {
+                executedQty,
+                fills
+            }
+        }
+    }
+
+    matchBid(order: Order): {fills: Fill[], executedQty: number} {
+        const fills: Fill[] = [];
+        let executedQty = 0;
+
+        for (let i = 0; i < this.asks.length; i++) {
+            if (this.asks[i].price <= order.price && executedQty < order.quantity) {
+                const filledQty = Math.min((order.quantity - executedQty), this.asks[i].quantity);
+                executedQty += filledQty;
+                this.asks[i].filled += filledQty;
+                fills.push({
+                    price: this.asks[i].price.toString(),
+                    qty: filledQty,
+                    tradeId: this.lastTradeId++,
+                    otherUserId: this.asks[i].userId,
+                    markerOrderId: this.asks[i].orderId
+                });
+            }
+        }
+        for (let i = 0; i < this.asks.length; i++) {
+            if (this.asks[i].filled === this.asks[i].quantity) {
+                this.asks.splice(i, 1);
+                i--;
+            }
+        }
+        return {
+            fills,
+            executedQty
+        };
+    }
+
+    matchAsk(order: Order): {fills: Fill[], executedQty: number} {
+        const fills: Fill[] = [];
+        let executedQty = 0;
+        
+        for (let i = 0; i < this.bids.length; i++) {
+            if (this.bids[i].price >= order.price && executedQty < order.quantity) {
+                const amountRemaining = Math.min(order.quantity - executedQty, this.bids[i].quantity);
+                executedQty += amountRemaining;
+                this.bids[i].filled += amountRemaining;
+                fills.push({
+                    price: this.bids[i].price.toString(),
+                    qty: amountRemaining,
+                    tradeId: this.lastTradeId++,
+                    otherUserId: this.bids[i].userId,
+                    markerOrderId: this.bids[i].orderId
+                });
+            }
+        }
+        for (let i = 0; i < this.bids.length; i++) {
+            if (this.bids[i].filled === this.bids[i].quantity) {
+                this.bids.splice(i, 1);
+                i--;
+            }
+        }
+        return {
+            fills,
+            executedQty
+        };
+    }
+
+    //TODO: Can you make this faster? Can you compute this during order matches?
+    getDepth() {
+        const bids: [string, string][] = [];
+        const asks: [string, string][] = [];
+
+        const bidsObj: {[key: string]: number} = {};
+        const asksObj: {[key: string]: number} = {};
+
+        for (let i = 0; i < this.bids.length; i++) {
+            const order = this.bids[i];
+            if (!bidsObj[order.price]) {
+                bidsObj[order.price] = 0;
+            }
+            bidsObj[order.price] += order.quantity;
+        }
+
+        for (let i = 0; i < this.asks.length; i++) {
+            const order = this.asks[i];
+            if (!asksObj[order.price]) {
+                asksObj[order.price] = 0;
+            }
+            asksObj[order.price] += order.quantity;
+        }
+
+        for (const price in bidsObj) {
+            bids.push([price, bidsObj[price].toString()]);
+        }
+
+        for (const price in asksObj) {
+            asks.push([price, asksObj[price].toString()]);
+        }
+
+        return {
+            bids,
+            asks
+        };
+    }
+
+    getOpenOrders(userId: string): Order[] {
+        const asks = this.asks.filter(x => x.userId === userId);
+        const bids = this.bids.filter(x => x.userId === userId);
+        return [...asks, ...bids];
+    }
+
+    cancelBid(order: Order) {
+        const index = this.bids.findIndex(x => x.orderId === order.orderId);
+        if (index !== -1) {
+            const price = this.bids[index].price;
+            this.bids.splice(index, 1);
+            return price
+        }
+    }
+
+    cancelAsk(order: Order) {
+        const index = this.asks.findIndex(x => x.orderId === order.orderId);
+        if (index !== -1) {
+            const price = this.asks[index].price;
+            this.asks.splice(index, 1);
+            return price
+        }
+    }
+
+}
+
+
+// ================ .\engine\src\types\fromApi.ts ================
+
+
+export const CREATE_ORDER = "CREATE_ORDER";
+export const CANCEL_ORDER = "CANCEL_ORDER";
+export const ON_RAMP = "ON_RAMP";
+
+export const GET_DEPTH = "GET_DEPTH";
+export const GET_OPEN_ORDERS = "GET_OPEN_ORDERS";
+
+
+//TODO: Can we share the types between the api and the engine?
+export type MessageFromApi = {
+    type: typeof CREATE_ORDER,
+    data: {
+        market: string,
+        price: string,
+        quantity: string,
+        side: "buy" | "sell",
+        userId: string
+    }
+} | {
+    type: typeof CANCEL_ORDER,
+    data: {
+        orderId: string,
+        market: string,
+    }
+} | {
+    type: typeof ON_RAMP,
+    data: {
+        amount: string,
+        userId: string,
+        txnId: string
+    }
+} | {
+    type: typeof GET_DEPTH,
+    data: {
+        market: string,
+    }
+} | {
+    type: typeof GET_OPEN_ORDERS,
+    data: {
+        userId: string,
+        market: string,
+    }
+}
+
+// ================ .\engine\src\types\index.ts ================
+
+export const TRADE_ADDED = "TRADE_ADDED";
+export const ORDER_UPDATE = "ORDER_UPDATE";
+
+
+// export type MessageFromOrderbook = {
+//     clientId: string;
+//     message: {
+//         type: "DEPTH",
+//     }
+// }
+
+// ================ .\engine\src\types\toApi.ts ================
+
+import { Order } from "../trade/Orderbook";
+
+export const CREATE_ORDER = "CREATE_ORDER";
+export const CANCEL_ORDER = "CANCEL_ORDER";
+export const ON_RAMP = "ON_RAMP";
+
+export const GET_DEPTH = "GET_DEPTH";
+
+export type MessageToApi = {
+    type: "DEPTH",
+    payload: {
+        bids: [string, string][],
+        asks: [string, string][],
+    }
+} | {
+    type: "ORDER_PLACED",
+    payload: {
+        orderId: string,
+        executedQty: number,
+        fills: {
+            price: string,
+            qty: number,
+            tradeId: number
+        }[]
+    }
+} | {
+    type: "ORDER_CANCELLED",
+    payload: {
+        orderId: string,
+        executedQty: number,
+        remainingQty: number
+    }
+} | {
+    type: "OPEN_ORDERS",
+    payload: Order[]
+}
+
+// ================ .\engine\src\types\toWs.ts ================
+
+//TODO: Can we share the types between the ws layer and the engine?
+
+export type TickerUpdateMessage = {
+    stream: string, 
+    data: {
+        c?: string,
+        h?: string,
+        l?: string,
+        v?: string,
+        V?: string,
+        s?: string,
+        id: number,
+        e: "ticker"
+    }
+}
+
+export type DepthUpdateMessage = {
+    stream: string,
+    data: {
+        b?: [string, string][],
+        a?: [string, string][],
+        e: "depth"
+    }
+}
+
+export type TradeAddedMessage = {
+    stream: string,
+    data: {
+        e: "trade",
+        t: number,
+        m: boolean,
+        p: string,
+        q: string,
+        s: string, // symbol
+    }
+}
+
+export type WsMessage = TickerUpdateMessage | DepthUpdateMessage | TradeAddedMessage;
+
+
+// ================ .\frontend\next-env.d copy.ts ================
+
+/// <reference types="next" />
+/// <reference types="next/image-types/global" />
+
+// NOTE: This file should not be edited
+// see https://nextjs.org/docs/basic-features/typescript for more information.
+
+
+// ================ .\frontend\next-env.d.ts ================
+
+/// <reference types="next" />
+/// <reference types="next/image-types/global" />
+
+// NOTE: This file should not be edited
+// see https://nextjs.org/docs/basic-features/typescript for more information.
+
+
+// ================ .\frontend\tailwind.config.ts ================
+
+import type { Config } from "tailwindcss";
+
+const config: Config = {
+    darkMode: ["class"],
+    content: [
+    "./pages/**/*.{js,ts,jsx,tsx,mdx}",
+    "./components/**/*.{js,ts,jsx,tsx,mdx}",
+    "./app/**/*.{js,ts,jsx,tsx,mdx}",
+  ],
+  theme: {
+  	fontSize: {
+  		xs: '0.7rem',
+  		sm: '0.8rem'
+  	},
+  	extend: {
+  		colors: {
+  			greenBackgroundTransparent: 'rgba(0,194,120,.12)',
+  			redBackgroundTransparent: 'rgba(234,56,59,.12)',
+  			baseBackgroundL2: 'rgb(32,33,39)',
+  			baseBackgroundL3: 'rgb(32,33,39)',
+  			greenPrimaryButtonBackground: 'rgb(0,194,120)',
+  			baseBackgroundL1: 'rgb(20,21,27)',
+  			background: 'hsl(var(--background))',
+  			foreground: 'hsl(var(--foreground))',
+  			card: {
+  				DEFAULT: 'hsl(var(--card))',
+  				foreground: 'hsl(var(--card-foreground))'
+  			},
+  			popover: {
+  				DEFAULT: 'hsl(var(--popover))',
+  				foreground: 'hsl(var(--popover-foreground))'
+  			},
+  			primary: {
+  				DEFAULT: 'hsl(var(--primary))',
+  				foreground: 'hsl(var(--primary-foreground))'
+  			},
+  			secondary: {
+  				DEFAULT: 'hsl(var(--secondary))',
+  				foreground: 'hsl(var(--secondary-foreground))'
+  			},
+  			muted: {
+  				DEFAULT: 'hsl(var(--muted))',
+  				foreground: 'hsl(var(--muted-foreground))'
+  			},
+  			accent: {
+  				DEFAULT: 'hsl(var(--accent))',
+  				foreground: 'hsl(var(--accent-foreground))'
+  			},
+  			destructive: {
+  				DEFAULT: 'hsl(var(--destructive))',
+  				foreground: 'hsl(var(--destructive-foreground))'
+  			},
+  			border: 'hsl(var(--border))',
+  			input: 'hsl(var(--input))',
+  			ring: 'hsl(var(--ring))',
+  			chart: {
+  				'1': 'hsl(var(--chart-1))',
+  				'2': 'hsl(var(--chart-2))',
+  				'3': 'hsl(var(--chart-3))',
+  				'4': 'hsl(var(--chart-4))',
+  				'5': 'hsl(var(--chart-5))'
+  			}
+  		},
+  		borderColor: {
+  			redBorder: 'rgba(234,56,59,.5)',
+  			greenBorder: 'rgba(0,194,120,.4)',
+  			baseBorderMed: '#cccccc',
+  			accentBlue: 'rgb(76,148,255)',
+  			baseBorderLight: 'rgb(32,33,39)',
+  			baseTextHighEmphasis: 'rgb(244,244,246)'
+  		},
+  		backgroundImage: {
+  			'gradient-radial': 'radial-gradient(var(--tw-gradient-stops))',
+  			'gradient-conic': 'conic-gradient(from 180deg at 50% 50%, var(--tw-gradient-stops))'
+  		},
+  		textColor: {
+  			greenPrimaryButtonText: 'rgb(20,21,27)'
+  		},
+  		borderRadius: {
+  			lg: 'var(--radius)',
+  			md: 'calc(var(--radius) - 2px)',
+  			sm: 'calc(var(--radius) - 4px)'
+  		}
+  	}
+  },
+  plugins: [require("tailwindcss-animate")],
+};
+export default config;
+
+
+// ================ .\frontend\app\globals.css ================
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --foreground-rgb: 0, 0, 0;
+  --background-start-rgb: 214, 219, 220;
+  --background-end-rgb: 255, 255, 255;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --foreground-rgb: 255, 255, 255;
+    --background-start-rgb: 0, 0, 0;
+    --background-end-rgb: 0, 0, 0;
+  }
+}
+
+body {
+  background: #0e0f14;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 3.9%;
+    --primary: 0 0% 9%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 0 0% 96.1%;
+    --secondary-foreground: 0 0% 9%;
+    --muted: 0 0% 96.1%;
+    --muted-foreground: 0 0% 45.1%;
+    --accent: 0 0% 96.1%;
+    --accent-foreground: 0 0% 9%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 89.8%;
+    --input: 0 0% 89.8%;
+    --ring: 0 0% 3.9%;
+    --chart-1: 12 76% 61%;
+    --chart-2: 173 58% 39%;
+    --chart-3: 197 37% 24%;
+    --chart-4: 43 74% 66%;
+    --chart-5: 27 87% 67%;
+    --radius: 0.5rem;
+  }
+  .dark {
+    --background: 0 0% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 0 0% 3.9%;
+    --card-foreground: 0 0% 98%;
+    --popover: 0 0% 3.9%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 0 0% 9%;
+    --secondary: 0 0% 14.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 0 0% 14.9%;
+    --muted-foreground: 0 0% 63.9%;
+    --accent: 0 0% 14.9%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 14.9%;
+    --input: 0 0% 14.9%;
+    --ring: 0 0% 83.1%;
+    --chart-1: 220 70% 50%;
+    --chart-2: 160 60% 45%;
+    --chart-3: 30 80% 55%;
+    --chart-4: 280 65% 60%;
+    --chart-5: 340 75% 55%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+
+// ================ .\frontend\app\layout.tsx ================
+
+import type { Metadata } from "next";
+import { Inter } from "next/font/google";
+import "./globals.css";
+import { Appbar } from "./components/Appbar";
+import { ThemeProvider } from "./components/themeProvider";
+import { ModeToggle } from "./components/Toggle";
+
+const inter = Inter({ subsets: ["latin"] });
+
+export const metadata: Metadata = {
+  title: "Create Next App",
+  description: "Generated by create next app",
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html lang="en">
+      <body className={inter.className}>
+        <Appbar/>
+        <ThemeProvider
+            attribute="class"
+            defaultTheme="system"
+            enableSystem
+            disableTransitionOnChange
+          >
+            {/* <ModeToggle/> */}
+            {children}
+          </ThemeProvider>
+      </body>
+    </html>
+  );
+}
+
+
+// ================ .\frontend\app\page.tsx ================
+
+import Image from "next/image";
+import { Markets } from "./components/Markets";
+
+export default function Home() {
+  return (
+    <main className="flex min-h-screen flex-col items-center justify-between p-24">
+      <Markets />
+    </main>
+  );
+}
+
+
+// ================ .\frontend\app\components\Appbar.tsx ================
+
+"use client";
+
+import { usePathname } from "next/navigation";
+import { PrimaryButton, SuccessButton } from "./core/Button"
+import { useRouter } from "next/navigation";
+
+export const Appbar = () => {
+    const route = usePathname();
+    const router = useRouter()
+
+    return <div className="text-white border-b border-slate-800">
+        <div className="flex justify-between items-center p-2">
+            <div className="flex">
+                <div className={`text-xl pl-4 flex flex-col font-semibold text-2xl justify-center cursor-pointer text-white`} onClick={() => router.push('/')}>
+                    Exchange
+                </div>
+                <div className={`text-sm pt-1 flex flex-col font-semibold justify-center pl-8 cursor-pointer ${route.startsWith('/markets') ? 'text-white' : 'text-slate-500'}`} onClick={() => router.push('/markets')}>
+                    Markets
+                </div>
+                <div className={`text-sm pt-1 flex flex-col  font-semibold justify-center pl-8 cursor-pointer ${route.startsWith('/trade') ? 'text-white' : 'text-slate-500'}`} onClick={() => router.push('/trade/SOL_USDC')}>
+                    Trade
+                </div>
+            </div>
+            <div className="flex">
+                <div className="p-2 mr-2">
+                    <SuccessButton>Deposit</SuccessButton>
+                    <PrimaryButton>Withdraw</PrimaryButton>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+
+// ================ .\frontend\app\components\MarketBar.tsx ================
+
+"use client";
+import { useEffect, useState } from "react";
+import type { Ticker } from "../utils/types";
+import { getTicker } from "../utils/httpClient";
+import { SignalingManager } from "../utils/SignalingManager";
+
+export const MarketBar = ({market}: {market: string}) => {
+    const [ticker, setTicker] = useState<Ticker | null>(null);
+
+    useEffect(() => {
+        getTicker(market).then(setTicker);
+        SignalingManager.getInstance().registerCallback("ticker", (data: Partial<Ticker>)  =>  setTicker(prevTicker => ({
+            firstPrice: data?.firstPrice ?? prevTicker?.firstPrice ?? '',
+            high: data?.high ?? prevTicker?.high ?? '',
+            lastPrice: data?.lastPrice ?? prevTicker?.lastPrice ?? '',
+            low: data?.low ?? prevTicker?.low ?? '',
+            priceChange: data?.priceChange ?? prevTicker?.priceChange ?? '',
+            priceChangePercent: data?.priceChangePercent ?? prevTicker?.priceChangePercent ?? '',
+            quoteVolume: data?.quoteVolume ?? prevTicker?.quoteVolume ?? '',
+            symbol: data?.symbol ?? prevTicker?.symbol ?? '',
+            trades: data?.trades ?? prevTicker?.trades ?? '',
+            volume: data?.volume ?? prevTicker?.volume ?? '',
+        })), `TICKER-${market}`);
+        SignalingManager.getInstance().sendMessage({"method":"SUBSCRIBE","params":[`ticker.${market}`]}	);
+
+        return () => {
+            SignalingManager.getInstance().deRegisterCallback("ticker", `TICKER-${market}`);
+            SignalingManager.getInstance().sendMessage({"method":"UNSUBSCRIBE","params":[`ticker.${market}`]}	);
+        }
+    }, [market])
+    // 
+
+    return <div>
+        <div className="flex items-center flex-row relative w-full overflow-hidden border-b border-slate-800">
+            <div className="flex items-center justify-between flex-row no-scrollbar overflow-auto pr-4">
+                    <Ticker market={market} />
+                    <div className="flex items-center flex-row space-x-8 pl-4">
+                        <div className="flex flex-col h-full justify-center">
+                            <p className={`font-medium tabular-nums text-greenText text-md text-green-500`}>{ticker?ticker.lastPrice:176.57}</p>
+                            <p className="font-medium  text-sm tabular-nums">${ticker?ticker.lastPrice:176.57}</p>
+                        </div>
+                        <div className="flex flex-col">
+                            <p className={`font-medium text-xs text-slate-400 `}>24H Change</p>
+                            <p className={`  font-medium tabular-nums leading-5 text-sm text-greenText ${Number(ticker?.priceChange) > 0 ? "text-green-500" : "text-red-500"}`}>{Number(ticker?.priceChange) > 0 ? "+" : ""} {ticker?.priceChange} {- Number(ticker?ticker.priceChangePercent:1.04)?.toFixed(2)}%</p></div><div className="flex flex-col">
+                                <p className="font-medium text-xs text-slate-400 text-sm">24H High</p>
+                                <p className="text-sm font-medium tabular-nums leading-5 text-sm ">{ticker?ticker.high:178.28}</p>
+                                </div>
+                                <div className="flex flex-col">
+                                    <p className="font-medium text-xs text-slate-400 text-sm">24H Low</p>
+                                    <p className="text-sm font-medium tabular-nums leading-5 text-sm ">{ticker?ticker.low:178.42}</p>
+                                </div>
+                            <button type="button" className="font-medium transition-opacity hover:opacity-80 hover:cursor-pointer text-base text-left" data-rac="">
+                                <div className="flex flex-col">
+                                    <p className="font-medium text-xs text-slate-400 text-sm">24H Volume</p>
+                                    <p className="mt-1 text-sm font-medium tabular-nums leading-5 text-sm ">{ticker?ticker.volume:<div>2,206,669.03</div>}
+                                </p>
+                            </div>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+}
+
+function Ticker({market}: {market: string}) {
+    return <div className="flex h-[60px] shrink-0 space-x-4">
+        <div className="flex flex-row relative ml-2 -mr-4">
+            <img alt="SOL Logo" loading="lazy" decoding="async" data-nimg="1" className="z-10 rounded-full h-6 w-6 mt-4 outline-baseBackgroundL1"  src="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTVvBqZC_Q1TSYObZaMvK0DRFeHZDUtVMh08Q&s" />
+            <img alt="USDC Logo" loading="lazy"decoding="async" data-nimg="1" className="h-6 w-6 -ml-2 mt-4 rounded-full" src="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTVvBqZC_Q1TSYObZaMvK0DRFeHZDUtVMh08Q&s" />
+        </div>
+        <button type="button" className="react-aria-Button" data-rac="">
+            <div className="flex items-center justify-between flex-row cursor-pointer rounded-lg p-3 hover:opacity-80">
+                <div className="flex items-center flex-row gap-2 undefined">
+                    <div className="flex flex-row relative">
+                        <p className="font-medium text-sm undefined">{market.replace("_", " / ")}</p>
+                    </div>
+                </div>
+            </div>
+        </button>
+    </div>
+}
+
+// ================ .\frontend\app\components\Markets.tsx ================
+
+"use client";
+
+import { useEffect, useState } from "react";
+import { Ticker } from "../utils/types";
+import { getTickers } from "../utils/httpClient";
+import { useRouter } from "next/navigation";
+
+export const Markets = () => {
+  const [tickers, setTickers] = useState<Ticker[]>();
+
+  useEffect(() => {
+    getTickers().then((m) => setTickers(m));
+  }, []);
+
+  return (
+    <div className="flex flex-col flex-1 max-w-[1280px] w-full">
+      <div className="flex flex-col min-w-[700px] flex-1 w-full">
+        <div className="flex flex-col w-full rounded-lg bg-baseBackgroundL1 px-5 py-3">
+          <table className="w-full table-auto">
+            <MarketHeader />
+            {/* {tickers?.map((m) => <MarketRow market={m} />)} */}
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+function MarketRow({ market }: { market: Ticker }) {
+  const router = useRouter();
+  return (
+    <tr className="cursor-pointer border-t border-baseBorderLight hover:bg-white/7 w-full" onClick={() => router.push(`/trade/${market.symbol}`)}>
+      <td className="px-1 py-3">
+        <div className="flex shrink">
+          <div className="flex items-center undefined">
+            <div
+              className="relative flex-none overflow-hidden rounded-full border border-baseBorderMed"
+              style={{ width: "40px", height: "40px" }}
+            >
+              <div className="relative">
+                <img
+                  alt={market.symbol}
+                  src={"https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTVvBqZC_Q1TSYObZaMvK0DRFeHZDUtVMh08Q&s"}
+                  loading="lazy"
+                  width="40"
+                  height="40"
+                  decoding="async"
+                  data-nimg="1"
+                  className=""
+                />
+              </div>
+            </div>
+            <div className="ml-4 flex flex-col">
+              <p className="whitespace-nowrap text-base font-medium text-baseTextHighEmphasis">
+                {market.symbol}
+              </p>
+              <div className="flex items-center justify-start flex-row gap-2">
+                <p className="flex-medium text-left text-xs leading-5 text-baseTextMedEmphasis">
+                  {market.symbol}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </td>
+      <td className="px-1 py-3">
+        <p className="text-base font-medium tabular-nums">{market.lastPrice}</p>
+      </td>
+      <td className="px-1 py-3">
+        <p className="text-base font-medium tabular-nums">{market.high}</p>
+      </td>
+      <td className="px-1 py-3">
+        <p className="text-base font-medium tabular-nums">{market.volume}</p>
+      </td>
+      <td className="px-1 py-3">
+        <p className="text-base font-medium tabular-nums text-greenText">
+          {Number(market.priceChangePercent)?.toFixed(3)} %
+        </p>
+      </td> 
+    </tr>
+  );
+}
+
+function MarketHeader() {
+  return (
+      <thead>
+        <tr className="">
+          <th className="px-2 py-3 text-left text-sm font-normal text-baseTextMedEmphasis">
+            <div className="flex items-center gap-1 cursor-pointer select-none">
+              Name<span className="w-[16px]"></span>
+            </div>
+          </th>
+          <th className="px-2 py-3 text-left text-sm font-normal text-baseTextMedEmphasis">
+            <div className="flex items-center gap-1 cursor-pointer select-none">
+              Price<span className="w-[16px]"></span>
+            </div>
+          </th>
+          <th className="px-2 py-3 text-left text-sm font-normal text-baseTextMedEmphasis">
+            <div className="flex items-center gap-1 cursor-pointer select-none">
+              Market Cap<span className="w-[16px]"></span>
+            </div>
+          </th>
+          <th className="px-2 py-3 text-left text-sm font-normal text-baseTextMedEmphasis">
+            <div className="flex items-center gap-1 cursor-pointer select-none">
+              24h Volume
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="24"
+                height="24"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                className="lucide lucide-arrow-down h-4 w-4"
+              >
+                <path d="M12 5v14"></path>
+                <path d="m19 12-7 7-7-7"></path>
+              </svg>
+            </div>
+          </th>
+          <th className="px-2 py-3 text-left text-sm font-normal text-baseTextMedEmphasis">
+            <div className="flex items-center gap-1 cursor-pointer select-none">
+              24h Change<span className="w-[16px]"></span>
+            </div>
+          </th>
+        </tr>
+      </thead>
+  );
+}
+
+// ================ .\frontend\app\components\SwapUI.tsx ================
+
+"use client";
+import { useState } from "react";
+export function SwapUI({ market }: {market: string}) {
+    const [amount, setAmount] = useState('');
+    const [activeTab, setActiveTab] = useState('buy');
+    const [type, setType] = useState('limit');
+
+    return <div>
+        <div className="flex flex-col">
+            <div className="flex flex-row h-[60px]">
+                <BuyButton activeTab={activeTab} setActiveTab={setActiveTab} />
+                <SellButton activeTab={activeTab} setActiveTab={setActiveTab} />
+            </div>
+            <div className="flex flex-col gap-1">
+                <div className="px-3">
+                    <div className="flex flex-row flex-0 gap-5 undefined">
+                        <LimitButton type={type} setType={setType} />
+                        <MarketButton type={type} setType={setType} />                       
+                    </div>
+                </div>
+                <div className="flex flex-col px-3">
+                    <div className="flex flex-col flex-1 gap-3 text-baseTextHighEmphasis">
+                        <div className="flex flex-col gap-3">
+                            <div className="flex items-center justify-between flex-row">
+                                <p className="text-xs font-normal text-baseTextMedEmphasis">Available Balance</p>
+                                <p className="font-medium text-xs text-baseTextHighEmphasis">36.94 USDC</p>
+                            </div>
+                        </div>
+                        <div className="flex flex-col gap-2">
+                            <p className="text-xs font-normal text-baseTextMedEmphasis">
+                                Price
+                            </p>
+                            <div className="flex flex-col relative">
+                                <input step="0.01" placeholder="0" className="h-12 rounded-lg border-2 border-solid border-baseBorderLight bg-[var(--background)] pr-12 text-right text-2xl leading-9 text-[$text] placeholder-baseTextMedEmphasis ring-0 transition focus:border-accentBlue focus:ring-0" type="text" value="134.38" />
+                                <div className="flex flex-row absolute right-1 top-1 p-2">
+                                    <div className="relative">
+                                        <img src="https://backpack.exchange/_next/image?url=%2Fcoins%2Fusdc.png&w=48&q=75" className="w-6 h-6" />
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div className="flex flex-col gap-2">
+                        <p className="text-xs font-normal text-baseTextMedEmphasis">
+                            Quantity
+                        </p>
+                        <div className="flex flex-col relative">
+                            <input step="0.01" placeholder="0" className="h-12 rounded-lg border-2 border-solid border-baseBorderLight bg-[var(--background)] pr-12 text-right text-2xl leading-9 text-[$text] placeholder-baseTextMedEmphasis ring-0 transition focus:border-accentBlue focus:ring-0" type="text" value="123" />
+                            <div className="flex flex-row absolute right-1 top-1 p-2">
+                                <div className="relative">
+                                    <img src="https://backpack.exchange/_next/image?url=%2Fcoins%2Fsol.png&w=48&q=75" className="w-6 h-6" />
+                                </div>
+                            </div>
+                        </div>
+                        <div className="flex justify-end flex-row">
+                            <p className="font-medium pr-2 text-xs text-baseTextMedEmphasis">≈ 0.00 USDC</p>
+                        </div>
+                        <div className="flex justify-center flex-row mt-2 gap-3">
+                            <div className="flex items-center justify-center flex-row rounded-full px-[16px] py-[6px] text-xs cursor-pointer bg-baseBackgroundL2 hover:bg-baseBackgroundL3">
+                                25%
+                            </div>
+                            <div className="flex items-center justify-center flex-row rounded-full px-[16px] py-[6px] text-xs cursor-pointer bg-baseBackgroundL2 hover:bg-baseBackgroundL3">
+                                50%
+                            </div>
+                            <div className="flex items-center justify-center flex-row rounded-full px-[16px] py-[6px] text-xs cursor-pointer bg-baseBackgroundL2 hover:bg-baseBackgroundL3">
+                                75%
+                            </div>
+                            <div className="flex items-center justify-center flex-row rounded-full px-[16px] py-[6px] text-xs cursor-pointer bg-baseBackgroundL2 hover:bg-baseBackgroundL3">
+                                Max
+                            </div>
+                        </div>
+                    </div>
+                    {activeTab=='buy'? <button type="button" className="font-semibold  focus:ring-blue-200 focus:none focus:outline-none text-center h-12 rounded-xl text-base px-4 py-2 my-4 bg-greenPrimaryButtonBackground text-greenPrimaryButtonText active:scale-98" data-rac="">Buy</button>: <button type="button" className="font-semibold  focus:ring-blue-200 focus:none focus:outline-none text-center h-12 rounded-xl text-base px-4 py-2 my-4 bg-red-500 text-greenPrimaryButtonText active:scale-98" data-rac="">Sell</button>}
+                   
+                    <div className="flex justify-between flex-row mt-1">
+                        <div className="flex flex-row gap-2">
+                            <div className="flex items-center">
+                                <input className="form-checkbox rounded border border-solid border-baseBorderMed bg-base-950 font-light text-transparent shadow-none shadow-transparent outline-none ring-0 ring-transparent checked:border-baseBorderMed checked:bg-base-900 checked:hover:border-baseBorderMed focus:bg-base-900 focus:ring-0 focus:ring-offset-0 focus:checked:border-baseBorderMed cursor-pointer h-5 w-5" id="postOnly" type="checkbox" data-rac="" />
+                                <label className="ml-2 text-xs">Post Only</label>
+                            </div>
+                            <div className="flex items-center">
+                                <input className="form-checkbox rounded border border-solid border-baseBorderMed bg-base-950 font-light text-transparent shadow-none shadow-transparent outline-none ring-0 ring-transparent checked:border-baseBorderMed checked:bg-base-900 checked:hover:border-baseBorderMed focus:bg-base-900 focus:ring-0 focus:ring-offset-0 focus:checked:border-baseBorderMed cursor-pointer h-5 w-5" id="ioc" type="checkbox" data-rac="" />
+                                <label className="ml-2 text-xs">IOC</label>
+                            </div>
+                        </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+}
+
+function LimitButton({ type, setType }: { type: string, setType: any }) {
+    return <div className="flex flex-col cursor-pointer justify-center py-2" onClick={() => setType('limit')}>
+    <div className={`text-sm font-medium py-1 border-b-2 ${type === 'limit' ? "border-accentBlue text-baseTextHighEmphasis" : "border-transparent text-baseTextMedEmphasis hover:border-baseTextHighEmphasis hover:text-baseTextHighEmphasis"}`}>
+        Limit
+    </div>
+</div>
+}
+
+function MarketButton({ type, setType }: { type: string, setType: any }) {
+    return  <div className="flex flex-col cursor-pointer justify-center py-2" onClick={() => setType('market')}>
+    <div className={`text-sm font-medium py-1 border-b-2 ${type === 'market' ? "border-accentBlue text-baseTextHighEmphasis" : "border-b-2 border-transparent text-baseTextMedEmphasis hover:border-baseTextHighEmphasis hover:text-baseTextHighEmphasis"} `}>
+        Market
+    </div>
+    </div>
+}
+
+function BuyButton({ activeTab, setActiveTab }: { activeTab: string, setActiveTab: any }) {
+    return <div className={`flex flex-col mb-[-2px] flex-1 cursor-pointer justify-center border-b-2 p-4 ${activeTab === 'buy' ? 'border-b-greenBorder bg-greenBackgroundTransparent' : 'border-b border-slate-800 hover:border-b-baseBorderFocus'}`} onClick={() => setActiveTab('buy')}>
+        <p className="text-center text-sm font-semibold text-green-500">
+            Buy
+        </p>
+    </div>
+}
+
+function SellButton({ activeTab, setActiveTab }: { activeTab: string, setActiveTab: any }) {
+    return <div className={`flex flex-col mb-[-2px] flex-1 cursor-pointer justify-center border-b-2 p-4 ${activeTab === 'sell' ? 'border-b-redBorder bg-redBackgroundTransparent' : 'border-b border-slate-800 hover:border-b-baseBorderFocus'}`} onClick={() => setActiveTab('sell')}>
+        <p className="text-center text-sm font-semibold text-red-600">
+            Sell
+        </p>
+    </div>
+}
+
+// ================ .\frontend\app\components\themeProvider.tsx ================
+
+"use client"
+
+import * as React from "react"
+import { ThemeProvider as NextThemesProvider } from "next-themes"
+import { type ThemeProviderProps } from "next-themes/dist/types"
+
+export  function ThemeProvider({ children, ...props }: ThemeProviderProps) {
+  return <NextThemesProvider {...props}>{children}</NextThemesProvider>
+}
+
+
+// ================ .\frontend\app\components\Toggle.tsx ================
+
+"use client"
+
+import * as React from "react"
+import { Moon, Sun } from "lucide-react"
+import { useTheme } from "next-themes"
+
+import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+
+export function ModeToggle() {
+  const { setTheme } = useTheme()
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" size="icon">
+          <Sun className="h-[1.2rem] w-[1.2rem] rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
+          <Moon className="absolute h-[1.2rem] w-[1.2rem] rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
+          <span className="sr-only">Toggle theme</span>
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem onClick={() => setTheme("light")}>
+          Light
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => setTheme("dark")}>
+          Dark
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => setTheme("system")}>
+          System
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+
+// ================ .\frontend\app\components\Trades.tsx ================
+
+
+
+// ================ .\frontend\app\components\TradeView.tsx ================
+
+import { useEffect, useRef } from "react";
+import { ChartManager } from "../utils/ChartManager";
+
+// Define interface for the new data format
+interface ExchangeData {
+  time_period_start: string;
+  time_period_end: string;
+  time_open: string;
+  time_close: string;
+  rate_open: number;
+  rate_high: number;
+  rate_low: number;
+  rate_close: number;
+}
+
+export function TradeView({
+  market,
+}: {
+  market: string;
+}) {
+  const chartRef = useRef<HTMLDivElement>(null);
+  const chartManagerRef = useRef<ChartManager>(null);
+
+  // Sample fixed data
+  const fixedData: ExchangeData[] =[
+    {
+        "time_period_start": "2024-10-25T00:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T00:00:00.0000000Z",
+        "time_close": "2024-10-25T00:59:59.8000000Z",
+        "rate_open": 177.09757659249772,
+        "rate_high": 177.39564271473046,
+        "rate_low": 176.10856305289906,
+        "rate_close": 176.63366000593825
+    },
+    {
+        "time_period_start": "2024-10-25T01:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T01:00:00.0000000Z",
+        "time_close": "2024-10-25T01:59:54.5000000Z",
+        "rate_open": 176.6331675944943,
+        "rate_high": 176.63700449332123,
+        "rate_low": 175.26914921456608,
+        "rate_close": 175.65467901080666
+    },
+    {
+        "time_period_start": "2024-10-25T02:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T02:00:00.0000000Z",
+        "time_close": "2024-10-25T02:59:59.8000000Z",
+        "rate_open": 175.64227090629322,
+        "rate_high": 176.45391836373938,
+        "rate_low": 175.0742428661975,
+        "rate_close": 175.65671425343686
+    },
+    {
+        "time_period_start": "2024-10-25T03:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T03:00:00.0000000Z",
+        "time_close": "2024-10-25T03:59:59.9000000Z",
+        "rate_open": 175.65671425343686,
+        "rate_high": 176.35559048227157,
+        "rate_low": 174.2847174336749,
+        "rate_close": 174.59536298727744
+    },
+    {
+        "time_period_start": "2024-10-25T04:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T04:00:00.0000000Z",
+        "time_close": "2024-10-25T04:59:59.8000000Z",
+        "rate_open": 174.61542459362894,
+        "rate_high": 174.98874514378974,
+        "rate_low": 172.7916744330457,
+        "rate_close": 173.17722198190313
+    },
+    {
+        "time_period_start": "2024-10-25T05:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T05:00:00.0000000Z",
+        "time_close": "2024-10-25T05:59:59.9000000Z",
+        "rate_open": 173.17722198190313,
+        "rate_high": 174.06774423322693,
+        "rate_low": 172.22296799967424,
+        "rate_close": 173.7429583017627
+    },
+    {
+        "time_period_start": "2024-10-25T06:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T06:00:00.0000000Z",
+        "time_close": "2024-10-25T06:59:59.8000000Z",
+        "rate_open": 173.7480258812526,
+        "rate_high": 174.4481974307736,
+        "rate_low": 173.27307390821488,
+        "rate_close": 173.4558980038308
+    },
+    {
+        "time_period_start": "2024-10-25T07:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T07:00:00.0000000Z",
+        "time_close": "2024-10-25T07:59:59.9000000Z",
+        "rate_open": 173.46702842869257,
+        "rate_high": 173.86247544008322,
+        "rate_low": 171.40270811100925,
+        "rate_close": 171.80990553113062
+    },
+    {
+        "time_period_start": "2024-10-25T08:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T08:00:00.0000000Z",
+        "time_close": "2024-10-25T08:59:59.8000000Z",
+        "rate_open": 171.81163094118477,
+        "rate_high": 172.8290379004115,
+        "rate_low": 170.8069739786763,
+        "rate_close": 172.24491591515803
+    },
+    {
+        "time_period_start": "2024-10-25T09:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T09:00:00.0000000Z",
+        "time_close": "2024-10-25T09:59:59.7000000Z",
+        "rate_open": 172.24009561992833,
+        "rate_high": 173.15683589870628,
+        "rate_low": 170.69207092207708,
+        "rate_close": 173.08612709140948
+    },
+    {
+        "time_period_start": "2024-10-25T10:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T10:00:00.0000000Z",
+        "time_close": "2024-10-25T10:59:59.1000000Z",
+        "rate_open": 173.08612709140965,
+        "rate_high": 173.80203360767104,
+        "rate_low": 172.27342378546797,
+        "rate_close": 173.46968495558602
+    },
+    {
+        "time_period_start": "2024-10-25T11:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T11:00:00.0000000Z",
+        "time_close": "2024-10-25T11:59:07.0000000Z",
+        "rate_open": 173.48145641017098,
+        "rate_high": 174.04473998911132,
+        "rate_low": 173.0641230401145,
+        "rate_close": 173.53941516559544
+    },
+    {
+        "time_period_start": "2024-10-25T12:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T12:00:00.0000000Z",
+        "time_close": "2024-10-25T12:59:00.0000000Z",
+        "rate_open": 173.54535055414576,
+        "rate_high": 174.406799124382,
+        "rate_low": 173.14745619278418,
+        "rate_close": 173.34676074294939
+    },
+    {
+        "time_period_start": "2024-10-25T13:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T13:00:00.0000000Z",
+        "time_close": "2024-10-25T13:59:57.5000000Z",
+        "rate_open": 173.36551250424424,
+        "rate_high": 175.18865804867335,
+        "rate_low": 172.85849825635745,
+        "rate_close": 175.0863453752569
+    },
+    {
+        "time_period_start": "2024-10-25T14:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T14:00:00.0000000Z",
+        "time_close": "2024-10-25T14:59:56.3000000Z",
+        "rate_open": 175.12399879780696,
+        "rate_high": 177.47544964370894,
+        "rate_low": 174.30003533894597,
+        "rate_close": 175.56489586048053
+    },
+    {
+        "time_period_start": "2024-10-25T15:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T15:00:00.0000000Z",
+        "time_close": "2024-10-25T15:59:54.2000000Z",
+        "rate_open": 175.56128498783767,
+        "rate_high": 176.67612935822663,
+        "rate_low": 171.22213292823773,
+        "rate_close": 172.37532727885838
+    },
+    {
+        "time_period_start": "2024-10-25T16:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T16:00:00.0000000Z",
+        "time_close": "2024-10-25T16:59:55.4000000Z",
+        "rate_open": 172.3885692925061,
+        "rate_high": 172.95413293478916,
+        "rate_low": 170.90364335051063,
+        "rate_close": 171.88059914192382
+    },
+    {
+        "time_period_start": "2024-10-25T17:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T17:00:00.0000000Z",
+        "time_close": "2024-10-25T17:59:56.1000000Z",
+        "rate_open": 171.93500034139433,
+        "rate_high": 172.28022923170232,
+        "rate_low": 166.96576011114533,
+        "rate_close": 167.86248005646297
+    },
+    {
+        "time_period_start": "2024-10-25T18:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T18:00:00.0000000Z",
+        "time_close": "2024-10-25T18:59:53.4000000Z",
+        "rate_open": 167.83934613128108,
+        "rate_high": 171.3951414210202,
+        "rate_low": 164.71457743832224,
+        "rate_close": 169.1990538789654
+    },
+    {
+        "time_period_start": "2024-10-25T19:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T19:00:00.0000000Z",
+        "time_close": "2024-10-25T19:59:54.2000000Z",
+        "rate_open": 169.2658269510107,
+        "rate_high": 169.48713933804868,
+        "rate_low": 167.29952714297804,
+        "rate_close": 167.84494193253036
+    },
+    {
+        "time_period_start": "2024-10-25T20:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T20:00:00.0000000Z",
+        "time_close": "2024-10-25T20:59:57.0000000Z",
+        "rate_open": 167.70254889934415,
+        "rate_high": 168.54437908428636,
+        "rate_low": 165.9903373305517,
+        "rate_close": 166.69571740242563
+    },
+    {
+        "time_period_start": "2024-10-25T21:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T21:00:00.0000000Z",
+        "time_close": "2024-10-25T21:59:54.6000000Z",
+        "rate_open": 166.8325580678153,
+        "rate_high": 168.38953181426083,
+        "rate_low": 166.7251313556868,
+        "rate_close": 167.95758389295452
+    },
+    {
+        "time_period_start": "2024-10-25T22:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T22:00:00.0000000Z",
+        "time_close": "2024-10-25T22:59:57.4000000Z",
+        "rate_open": 167.94861666297948,
+        "rate_high": 167.96827161662242,
+        "rate_low": 163.34662273620216,
+        "rate_close": 163.52573805722506
+    },
+    {
+        "time_period_start": "2024-10-25T23:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-25T23:00:00.0000000Z",
+        "time_close": "2024-10-25T23:59:53.3000000Z",
+        "rate_open": 163.52293628523532,
+        "rate_high": 165.1056446414487,
+        "rate_low": 159.69415769691003,
+        "rate_close": 164.74985170029268
+    },
+    {
+        "time_period_start": "2024-10-26T00:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T00:00:00.0000000Z",
+        "time_close": "2024-10-26T00:59:46.2000000Z",
+        "rate_open": 164.6147319394689,
+        "rate_high": 165.67645134341973,
+        "rate_low": 163.61514089117713,
+        "rate_close": 164.64658936375417
+    },
+    {
+        "time_period_start": "2024-10-26T01:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T01:00:00.0000000Z",
+        "time_close": "2024-10-26T01:59:56.1000000Z",
+        "rate_open": 164.6397767220984,
+        "rate_high": 165.07517881704746,
+        "rate_low": 163.066307544181,
+        "rate_close": 163.08846578493726
+    },
+    {
+        "time_period_start": "2024-10-26T02:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T02:00:00.0000000Z",
+        "time_close": "2024-10-26T02:59:54.6000000Z",
+        "rate_open": 163.10044818601494,
+        "rate_high": 165.64610564597916,
+        "rate_low": 162.22162712222092,
+        "rate_close": 164.75816749129115
+    },
+    {
+        "time_period_start": "2024-10-26T03:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T03:00:00.0000000Z",
+        "time_close": "2024-10-26T03:59:59.7000000Z",
+        "rate_open": 164.58998722656017,
+        "rate_high": 165.65994213975947,
+        "rate_low": 163.90209209380293,
+        "rate_close": 165.42990141190768
+    },
+    {
+        "time_period_start": "2024-10-26T04:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T04:00:00.0000000Z",
+        "time_close": "2024-10-26T04:59:54.3000000Z",
+        "rate_open": 165.39872473575957,
+        "rate_high": 166.38580034389943,
+        "rate_low": 165.0911173972719,
+        "rate_close": 166.333433476748
+    },
+    {
+        "time_period_start": "2024-10-26T05:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T05:00:00.0000000Z",
+        "time_close": "2024-10-26T05:59:54.3000000Z",
+        "rate_open": 166.3235668848427,
+        "rate_high": 167.52320459092678,
+        "rate_low": 166.0184584580464,
+        "rate_close": 166.67480916100502
+    },
+    {
+        "time_period_start": "2024-10-26T06:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T06:00:00.0000000Z",
+        "time_close": "2024-10-26T06:59:55.8000000Z",
+        "rate_open": 166.6335741397963,
+        "rate_high": 168.3585438051535,
+        "rate_low": 166.21053201233298,
+        "rate_close": 168.25012176861625
+    },
+    {
+        "time_period_start": "2024-10-26T07:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T07:00:00.0000000Z",
+        "time_close": "2024-10-26T07:59:56.3000000Z",
+        "rate_open": 168.24953048721076,
+        "rate_high": 168.94104051609816,
+        "rate_low": 167.10611565364283,
+        "rate_close": 167.16559354380084
+    },
+    {
+        "time_period_start": "2024-10-26T08:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T08:00:00.0000000Z",
+        "time_close": "2024-10-26T08:59:57.1000000Z",
+        "rate_open": 167.16405389851525,
+        "rate_high": 168.40948810174226,
+        "rate_low": 167.15781181894923,
+        "rate_close": 168.21129434627568
+    },
+    {
+        "time_period_start": "2024-10-26T09:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T09:00:00.0000000Z",
+        "time_close": "2024-10-26T09:59:55.3000000Z",
+        "rate_open": 168.22620893491768,
+        "rate_high": 169.33858053065447,
+        "rate_low": 167.89840600846145,
+        "rate_close": 168.98044615747813
+    },
+    {
+        "time_period_start": "2024-10-26T10:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T10:00:00.0000000Z",
+        "time_close": "2024-10-26T10:59:55.8000000Z",
+        "rate_open": 168.956088573294,
+        "rate_high": 170.13292120413223,
+        "rate_low": 168.87344022185576,
+        "rate_close": 169.06531700399373
+    },
+    {
+        "time_period_start": "2024-10-26T11:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T11:00:00.0000000Z",
+        "time_close": "2024-10-26T11:59:59.9000000Z",
+        "rate_open": 169.07001612886341,
+        "rate_high": 169.42631927446936,
+        "rate_low": 168.1584400820694,
+        "rate_close": 168.46688163797944
+    },
+    {
+        "time_period_start": "2024-10-26T12:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T12:00:00.0000000Z",
+        "time_close": "2024-10-26T12:59:58.6000000Z",
+        "rate_open": 168.47153536170947,
+        "rate_high": 169.27665190543632,
+        "rate_low": 168.17093979168592,
+        "rate_close": 168.83830871175218
+    },
+    {
+        "time_period_start": "2024-10-26T13:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T13:00:00.0000000Z",
+        "time_close": "2024-10-26T13:59:58.1000000Z",
+        "rate_open": 168.8391176118095,
+        "rate_high": 169.06133362573604,
+        "rate_low": 167.80892315235843,
+        "rate_close": 167.93644305949562
+    },
+    {
+        "time_period_start": "2024-10-26T14:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T14:00:00.0000000Z",
+        "time_close": "2024-10-26T14:59:58.7000000Z",
+        "rate_open": 167.89486594898824,
+        "rate_high": 168.41007561945054,
+        "rate_low": 167.18687568985303,
+        "rate_close": 167.51024957454558
+    },
+    {
+        "time_period_start": "2024-10-26T15:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T15:00:00.0000000Z",
+        "time_close": "2024-10-26T15:59:57.5000000Z",
+        "rate_open": 167.509177470656,
+        "rate_high": 169.13731509379522,
+        "rate_low": 167.48990530627347,
+        "rate_close": 168.4011332338531
+    },
+    {
+        "time_period_start": "2024-10-26T16:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T16:00:00.0000000Z",
+        "time_close": "2024-10-26T16:59:58.3000000Z",
+        "rate_open": 168.38859405104097,
+        "rate_high": 169.57645444486906,
+        "rate_low": 168.1692150350943,
+        "rate_close": 169.0482899700727
+    },
+    {
+        "time_period_start": "2024-10-26T17:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T17:00:00.0000000Z",
+        "time_close": "2024-10-26T17:59:56.7000000Z",
+        "rate_open": 169.03599251075067,
+        "rate_high": 170.01232155966855,
+        "rate_low": 168.70126585419482,
+        "rate_close": 169.89131335136582
+    },
+    {
+        "time_period_start": "2024-10-26T18:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T18:00:00.0000000Z",
+        "time_close": "2024-10-26T18:59:55.4000000Z",
+        "rate_open": 169.8543164904326,
+        "rate_high": 170.15911543397655,
+        "rate_low": 169.36006747610958,
+        "rate_close": 169.68118624081757
+    },
+    {
+        "time_period_start": "2024-10-26T19:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T19:00:00.0000000Z",
+        "time_close": "2024-10-26T19:59:54.5000000Z",
+        "rate_open": 169.6803640921549,
+        "rate_high": 172.05519545211186,
+        "rate_low": 169.64719577581573,
+        "rate_close": 171.31065597530875
+    },
+    {
+        "time_period_start": "2024-10-26T20:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T20:00:00.0000000Z",
+        "time_close": "2024-10-26T20:59:58.6000000Z",
+        "rate_open": 171.31571560521883,
+        "rate_high": 172.86026441231635,
+        "rate_low": 171.18254393185657,
+        "rate_close": 172.3070613053327
+    },
+    {
+        "time_period_start": "2024-10-26T21:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T21:00:00.0000000Z",
+        "time_close": "2024-10-26T21:59:56.1000000Z",
+        "rate_open": 172.32319813604832,
+        "rate_high": 173.04931792621528,
+        "rate_low": 170.80512347058755,
+        "rate_close": 171.0920493595966
+    },
+    {
+        "time_period_start": "2024-10-26T22:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T22:00:00.0000000Z",
+        "time_close": "2024-10-26T22:59:58.0000000Z",
+        "rate_open": 171.10395346827113,
+        "rate_high": 171.63303622082418,
+        "rate_low": 170.659219179893,
+        "rate_close": 171.23157621214514
+    },
+    {
+        "time_period_start": "2024-10-26T23:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-26T23:00:00.0000000Z",
+        "time_close": "2024-10-26T23:59:55.1000000Z",
+        "rate_open": 171.1888720341263,
+        "rate_high": 171.33864730227032,
+        "rate_low": 170.4505515145825,
+        "rate_close": 170.67506640874217
+    },
+    {
+        "time_period_start": "2024-10-27T00:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T00:00:00.0000000Z",
+        "time_close": "2024-10-27T00:59:57.2000000Z",
+        "rate_open": 170.68639329318754,
+        "rate_high": 171.0310990989932,
+        "rate_low": 170.08851329751553,
+        "rate_close": 170.4384159109907
+    },
+    {
+        "time_period_start": "2024-10-27T01:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T01:00:00.0000000Z",
+        "time_close": "2024-10-27T01:59:59.5000000Z",
+        "rate_open": 170.4367336574749,
+        "rate_high": 172.3192503485752,
+        "rate_low": 170.15196494032435,
+        "rate_close": 172.19215176004505
+    },
+    {
+        "time_period_start": "2024-10-27T02:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T02:00:00.0000000Z",
+        "time_close": "2024-10-27T02:59:59.5000000Z",
+        "rate_open": 172.19221993096892,
+        "rate_high": 173.01568987331353,
+        "rate_low": 171.10816372461932,
+        "rate_close": 171.35984656628466
+    },
+    {
+        "time_period_start": "2024-10-27T03:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T03:00:00.0000000Z",
+        "time_close": "2024-10-27T03:59:59.2000000Z",
+        "rate_open": 171.3475598361463,
+        "rate_high": 172.17115278592647,
+        "rate_low": 170.89851873583163,
+        "rate_close": 171.92139796495118
+    },
+    {
+        "time_period_start": "2024-10-27T04:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T04:00:00.0000000Z",
+        "time_close": "2024-10-27T04:59:56.7000000Z",
+        "rate_open": 171.9304142370309,
+        "rate_high": 172.4287267425695,
+        "rate_low": 171.44460424395564,
+        "rate_close": 172.30832377603772
+    },
+    {
+        "time_period_start": "2024-10-27T05:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T05:00:00.0000000Z",
+        "time_close": "2024-10-27T05:59:55.9000000Z",
+        "rate_open": 172.2917105894219,
+        "rate_high": 172.8889566601663,
+        "rate_low": 172.10434515246445,
+        "rate_close": 172.3865781259052
+    },
+    {
+        "time_period_start": "2024-10-27T06:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T06:00:00.0000000Z",
+        "time_close": "2024-10-27T06:59:58.5000000Z",
+        "rate_open": 172.32959408489526,
+        "rate_high": 173.2038406654434,
+        "rate_low": 172.01138014454722,
+        "rate_close": 173.17213809209989
+    },
+    {
+        "time_period_start": "2024-10-27T07:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T07:00:00.0000000Z",
+        "time_close": "2024-10-27T07:59:43.4000000Z",
+        "rate_open": 173.1637410284829,
+        "rate_high": 173.31709975773163,
+        "rate_low": 172.6244353372204,
+        "rate_close": 173.06295012482875
+    },
+    {
+        "time_period_start": "2024-10-27T08:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T08:00:00.0000000Z",
+        "time_close": "2024-10-27T08:59:54.5000000Z",
+        "rate_open": 173.07583270774572,
+        "rate_high": 175.33599530957173,
+        "rate_low": 172.9307813257167,
+        "rate_close": 175.14114167478317
+    },
+    {
+        "time_period_start": "2024-10-27T09:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T09:00:00.0000000Z",
+        "time_close": "2024-10-27T09:59:55.2000000Z",
+        "rate_open": 175.09381598700057,
+        "rate_high": 175.30001082235754,
+        "rate_low": 173.46311588651673,
+        "rate_close": 174.4236152536616
+    },
+    {
+        "time_period_start": "2024-10-27T10:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T10:00:00.0000000Z",
+        "time_close": "2024-10-27T10:59:55.6000000Z",
+        "rate_open": 174.41345462987783,
+        "rate_high": 174.53898336758581,
+        "rate_low": 173.34316005878767,
+        "rate_close": 173.46627712904302
+    },
+    {
+        "time_period_start": "2024-10-27T11:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T11:00:00.0000000Z",
+        "time_close": "2024-10-27T11:59:58.8000000Z",
+        "rate_open": 173.4645354167101,
+        "rate_high": 174.76195851801103,
+        "rate_low": 173.23338429820132,
+        "rate_close": 173.81004880507336
+    },
+    {
+        "time_period_start": "2024-10-27T12:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T12:00:00.0000000Z",
+        "time_close": "2024-10-27T12:59:58.4000000Z",
+        "rate_open": 173.8100586854427,
+        "rate_high": 175.85313818079268,
+        "rate_low": 173.75532506026536,
+        "rate_close": 175.58309470846206
+    },
+    {
+        "time_period_start": "2024-10-27T13:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T13:00:00.0000000Z",
+        "time_close": "2024-10-27T13:59:55.4000000Z",
+        "rate_open": 175.57852340406836,
+        "rate_high": 176.54006736979704,
+        "rate_low": 175.32635309185255,
+        "rate_close": 175.80088096732018
+    },
+    {
+        "time_period_start": "2024-10-27T14:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T14:00:00.0000000Z",
+        "time_close": "2024-10-27T14:59:59.7000000Z",
+        "rate_open": 175.77480725898317,
+        "rate_high": 176.8531977157011,
+        "rate_low": 175.50323627516178,
+        "rate_close": 176.25053843876609
+    },
+    {
+        "time_period_start": "2024-10-27T15:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T15:00:00.0000000Z",
+        "time_close": "2024-10-27T15:59:55.0000000Z",
+        "rate_open": 176.25829331163416,
+        "rate_high": 176.7156551007254,
+        "rate_low": 175.43521565802564,
+        "rate_close": 175.5626123654354
+    },
+    {
+        "time_period_start": "2024-10-27T16:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T16:00:00.0000000Z",
+        "time_close": "2024-10-27T16:59:58.0000000Z",
+        "rate_open": 175.58301914910427,
+        "rate_high": 176.5531885644759,
+        "rate_low": 174.5087285182161,
+        "rate_close": 176.51563215251315
+    },
+    {
+        "time_period_start": "2024-10-27T17:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T17:00:00.0000000Z",
+        "time_close": "2024-10-27T17:59:55.5000000Z",
+        "rate_open": 176.52302036853266,
+        "rate_high": 177.53548259368145,
+        "rate_low": 175.9695363612398,
+        "rate_close": 176.00642831810467
+    },
+    {
+        "time_period_start": "2024-10-27T18:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T18:00:00.0000000Z",
+        "time_close": "2024-10-27T18:59:58.3000000Z",
+        "rate_open": 176.00623005784072,
+        "rate_high": 177.11790096624412,
+        "rate_low": 175.59359221717293,
+        "rate_close": 175.6979762455539
+    },
+    {
+        "time_period_start": "2024-10-27T19:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T19:00:00.0000000Z",
+        "time_close": "2024-10-27T19:59:59.7000000Z",
+        "rate_open": 175.6430549022804,
+        "rate_high": 177.16851655258765,
+        "rate_low": 175.42021222060765,
+        "rate_close": 176.99837816445816
+    },
+    {
+        "time_period_start": "2024-10-27T20:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T20:00:00.0000000Z",
+        "time_close": "2024-10-27T20:59:57.9000000Z",
+        "rate_open": 176.9942946162644,
+        "rate_high": 177.2855761859493,
+        "rate_low": 176.40950356871812,
+        "rate_close": 176.6979336734171
+    },
+    {
+        "time_period_start": "2024-10-27T21:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T21:00:00.0000000Z",
+        "time_close": "2024-10-27T21:59:57.5000000Z",
+        "rate_open": 176.68538951628108,
+        "rate_high": 177.84674181672847,
+        "rate_low": 176.3729238076807,
+        "rate_close": 176.88702128382783
+    },
+    {
+        "time_period_start": "2024-10-27T22:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T22:00:00.0000000Z",
+        "time_close": "2024-10-27T22:59:56.9000000Z",
+        "rate_open": 176.8811437317622,
+        "rate_high": 178.0025698146555,
+        "rate_low": 176.83913505899554,
+        "rate_close": 177.54550102904253
+    },
+    {
+        "time_period_start": "2024-10-27T23:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-27T23:00:00.0000000Z",
+        "time_close": "2024-10-27T23:59:54.6000000Z",
+        "rate_open": 177.54301001379997,
+        "rate_high": 178.06598985472067,
+        "rate_low": 176.46406133127724,
+        "rate_close": 176.61190844558445
+    },
+    {
+        "time_period_start": "2024-10-28T00:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T00:00:00.0000000Z",
+        "time_close": "2024-10-28T00:59:35.1000000Z",
+        "rate_open": 176.42907152921185,
+        "rate_high": 176.98670909935188,
+        "rate_low": 175.58455872311396,
+        "rate_close": 175.83468122534268
+    },
+    {
+        "time_period_start": "2024-10-28T01:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T01:00:00.0000000Z",
+        "time_close": "2024-10-28T01:59:44.1000000Z",
+        "rate_open": 175.86598042017903,
+        "rate_high": 176.37176356399695,
+        "rate_low": 175.31215046815043,
+        "rate_close": 175.5030488566705
+    },
+    {
+        "time_period_start": "2024-10-28T02:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T02:00:00.0000000Z",
+        "time_close": "2024-10-28T02:59:57.4000000Z",
+        "rate_open": 175.4594941535876,
+        "rate_high": 175.93725054766088,
+        "rate_low": 174.6535998588201,
+        "rate_close": 174.98640998081706
+    },
+    {
+        "time_period_start": "2024-10-28T03:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T03:00:00.0000000Z",
+        "time_close": "2024-10-28T03:59:57.1000000Z",
+        "rate_open": 174.97024720562177,
+        "rate_high": 176.54081432396978,
+        "rate_low": 174.88548363795584,
+        "rate_close": 175.58755065358866
+    },
+    {
+        "time_period_start": "2024-10-28T04:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T04:00:00.0000000Z",
+        "time_close": "2024-10-28T04:59:55.2000000Z",
+        "rate_open": 175.54994897212362,
+        "rate_high": 175.55996337569832,
+        "rate_low": 173.67237698107178,
+        "rate_close": 175.08438349580737
+    },
+    {
+        "time_period_start": "2024-10-28T05:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T05:00:00.0000000Z",
+        "time_close": "2024-10-28T05:59:58.2000000Z",
+        "rate_open": 175.081193830263,
+        "rate_high": 175.094188263899,
+        "rate_low": 172.93003249083984,
+        "rate_close": 174.241400620074
+    },
+    {
+        "time_period_start": "2024-10-28T06:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T06:00:00.0000000Z",
+        "time_close": "2024-10-28T06:59:59.0000000Z",
+        "rate_open": 174.16947541090963,
+        "rate_high": 174.48919456460516,
+        "rate_low": 173.16502265477692,
+        "rate_close": 174.3282928502184
+    },
+    {
+        "time_period_start": "2024-10-28T07:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T07:00:00.0000000Z",
+        "time_close": "2024-10-28T07:59:58.5000000Z",
+        "rate_open": 174.33086554494872,
+        "rate_high": 176.47207209017196,
+        "rate_low": 174.16446798792276,
+        "rate_close": 175.47091880006758
+    },
+    {
+        "time_period_start": "2024-10-28T08:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T08:00:00.0000000Z",
+        "time_close": "2024-10-28T08:59:59.8000000Z",
+        "rate_open": 175.47497270592442,
+        "rate_high": 177.20866275204403,
+        "rate_low": 175.4148973993147,
+        "rate_close": 176.6597238851872
+    },
+    {
+        "time_period_start": "2024-10-28T09:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T09:00:00.0000000Z",
+        "time_close": "2024-10-28T09:59:56.1000000Z",
+        "rate_open": 176.66471617773746,
+        "rate_high": 177.64280143990223,
+        "rate_low": 176.2174333375439,
+        "rate_close": 177.56817773529644
+    },
+    {
+        "time_period_start": "2024-10-28T10:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T10:00:02.5000000Z",
+        "time_close": "2024-10-28T10:59:57.1000000Z",
+        "rate_open": 177.56258243535945,
+        "rate_high": 178.38072393496697,
+        "rate_low": 176.99588102966976,
+        "rate_close": 177.090042839529
+    },
+    {
+        "time_period_start": "2024-10-28T11:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T11:00:03.7000000Z",
+        "time_close": "2024-10-28T11:59:57.8000000Z",
+        "rate_open": 177.0485005391145,
+        "rate_high": 177.62131347192587,
+        "rate_low": 176.57748264846552,
+        "rate_close": 176.75927136058448
+    },
+    {
+        "time_period_start": "2024-10-28T12:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T12:00:03.8000000Z",
+        "time_close": "2024-10-28T12:59:57.9000000Z",
+        "rate_open": 176.8176265399297,
+        "rate_high": 177.73953399433492,
+        "rate_low": 176.14514316742444,
+        "rate_close": 177.4773393403333
+    },
+    {
+        "time_period_start": "2024-10-28T13:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T13:00:03.8000000Z",
+        "time_close": "2024-10-28T13:59:57.3000000Z",
+        "rate_open": 177.40012960382822,
+        "rate_high": 177.5958560910626,
+        "rate_low": 174.97573105919778,
+        "rate_close": 175.04000981657148
+    },
+    {
+        "time_period_start": "2024-10-28T14:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T14:00:04.9000000Z",
+        "time_close": "2024-10-28T14:59:56.8000000Z",
+        "rate_open": 175.02774877634914,
+        "rate_high": 175.53207610430027,
+        "rate_low": 173.2730754771627,
+        "rate_close": 174.8620419721679
+    },
+    {
+        "time_period_start": "2024-10-28T15:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T15:00:03.6000000Z",
+        "time_close": "2024-10-28T15:59:56.7000000Z",
+        "rate_open": 174.8220841210263,
+        "rate_high": 174.86955279102645,
+        "rate_low": 173.1477886276277,
+        "rate_close": 173.28312939461802
+    },
+    {
+        "time_period_start": "2024-10-28T16:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T16:00:03.7000000Z",
+        "time_close": "2024-10-28T16:59:58.1000000Z",
+        "rate_open": 173.22259030982042,
+        "rate_high": 175.0535231096922,
+        "rate_low": 172.99243756272585,
+        "rate_close": 173.72297760058348
+    },
+    {
+        "time_period_start": "2024-10-28T17:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T17:00:05.6000000Z",
+        "time_close": "2024-10-28T17:59:59.5000000Z",
+        "rate_open": 173.73579200519092,
+        "rate_high": 175.74871538186198,
+        "rate_low": 172.36771980823508,
+        "rate_close": 174.68956997815326
+    },
+    {
+        "time_period_start": "2024-10-28T18:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T18:00:05.7000000Z",
+        "time_close": "2024-10-28T18:59:55.6000000Z",
+        "rate_open": 174.6325819567261,
+        "rate_high": 175.8449757819351,
+        "rate_low": 174.5503115386921,
+        "rate_close": 175.36923503013244
+    },
+    {
+        "time_period_start": "2024-10-28T19:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T19:00:01.7000000Z",
+        "time_close": "2024-10-28T19:59:57.5000000Z",
+        "rate_open": 175.43320715605057,
+        "rate_high": 177.94409658262109,
+        "rate_low": 175.21628459808838,
+        "rate_close": 176.2922949691122
+    },
+    {
+        "time_period_start": "2024-10-28T20:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T20:00:03.9000000Z",
+        "time_close": "2024-10-28T20:59:54.7000000Z",
+        "rate_open": 176.35481806745514,
+        "rate_high": 176.5373959908393,
+        "rate_low": 175.6797289395402,
+        "rate_close": 176.32289600858988
+    },
+    {
+        "time_period_start": "2024-10-28T21:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T21:00:00.7000000Z",
+        "time_close": "2024-10-28T21:59:55.1000000Z",
+        "rate_open": 176.5716455295683,
+        "rate_high": 177.8618227765219,
+        "rate_low": 176.26309733350377,
+        "rate_close": 177.56033472918912
+    },
+    {
+        "time_period_start": "2024-10-28T22:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T22:00:00.9000000Z",
+        "time_close": "2024-10-28T22:59:54.3000000Z",
+        "rate_open": 177.56681337204355,
+        "rate_high": 179.61171883365898,
+        "rate_low": 177.5376722214548,
+        "rate_close": 178.5456301579788
+    },
+    {
+        "time_period_start": "2024-10-28T23:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-28T23:00:01.0000000Z",
+        "time_close": "2024-10-28T23:59:43.0000000Z",
+        "rate_open": 178.53735238073492,
+        "rate_high": 179.35727599814237,
+        "rate_low": 177.80793827140627,
+        "rate_close": 178.1690213354948
+    },
+    {
+        "time_period_start": "2024-10-29T00:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-29T00:00:16.3000000Z",
+        "time_close": "2024-10-29T00:59:59.0000000Z",
+        "rate_open": 178.23113709525623,
+        "rate_high": 178.87281836740365,
+        "rate_low": 177.29094906985128,
+        "rate_close": 178.56655141011908
+    },
+    {
+        "time_period_start": "2024-10-29T01:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-29T01:00:06.5000000Z",
+        "time_close": "2024-10-29T01:59:59.4000000Z",
+        "rate_open": 178.48336756621407,
+        "rate_high": 178.49390911196303,
+        "rate_low": 177.02097073279356,
+        "rate_close": 178.18071251111823
+    },
+    {
+        "time_period_start": "2024-10-29T02:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-29T02:00:07.7000000Z",
+        "time_close": "2024-10-29T02:59:54.3000000Z",
+        "rate_open": 178.14124104412807,
+        "rate_high": 182.16224149070626,
+        "rate_low": 177.83263841095152,
+        "rate_close": 180.70014894625945
+    },
+    {
+        "time_period_start": "2024-10-29T03:00:00.0000000Z",
+        "time_period_end": "0001-01-01T00:00:00.0000000Z",
+        "time_open": "2024-10-29T03:00:00.7000000Z",
+        "time_close": "2024-10-29T03:59:57.7000000Z",
+        "rate_open": 180.68788106972693,
+        "rate_high": 181.80997917642935,
+        "rate_low": 180.26257038305658,
+        "rate_close": 181.67314674387302
+    }
+]
+  useEffect(() => {
+    const init = () => {
+      if (chartRef.current) {
+        if (chartManagerRef.current) {
+          chartManagerRef.current.destroy();
+        }
+
+        // Transform the fixed data into the format expected by ChartManager
+        const transformedData = fixedData.map(data => ({
+          close: data.rate_close,
+          high: data.rate_high,
+          low: data.rate_low,
+          open: data.rate_open,
+          timestamp: new Date(data.time_period_start)
+        })).sort((x, y) => (x.timestamp < y.timestamp ? -1 : 1));
+
+        const chartManager = new ChartManager(
+          chartRef.current,
+          transformedData,
+          {
+            background: "#0e0f14",
+            color: "white",
+          }
+        );
+        
+        //@ts-ignore
+        chartManagerRef.current = chartManager;
+      }
+    };
+
+    init();
+  }, [market, chartRef]);
+
+  return (
+    <>
+      <div 
+        ref={chartRef} 
+        style={{ 
+          height: "50%", 
+          width: "100%", 
+          marginTop: 4 
+        }}
+      />
+    </>
+  );
+}
+
+// ================ .\frontend\app\components\core\Button.tsx ================
+
+
+export const PrimaryButton = ({ children, onClick }: { children: string, onClick?: () => void }) => {
+    return <button type="button" className="text-center font-semibold rounded-lg focus:ring-blue-200 focus:none focus:outline-none hover:opacity-90 disabled:opacity-80 disabled:hover:opacity-80 relative overflow-hidden h-[32px] text-sm px-3 py-1.5 mr-4 ">
+        <div className="absolute inset-0 bg-blue-500 opacity-[16%]"></div>
+        <div className="flex flex-row items-center justify-center gap-4"><p className="text-blue-500">{children}</p></div>
+    </button>
+
+} 
+
+export const SuccessButton = ({ children, onClick }: { children: string, onClick?: () => void }) => {
+    return <button type="button" className="text-center font-semibold rounded-lg focus:ring-green-200 focus:none focus:outline-none hover:opacity-90 disabled:opacity-80 disabled:hover:opacity-80 relative overflow-hidden h-[32px] text-sm px-3 py-1.5 mr-4 ">
+        <div className="absolute inset-0 bg-green-500 opacity-[16%]"></div>
+        <div className="flex flex-row items-center justify-center gap-4"><p className="text-green-500">{children}</p></div>
+    </button>
+
+} 
+
+// ================ .\frontend\app\components\depth\AskTable.tsx ================
+
+
+export const AskTable = ({ asks }: { asks: [string, string][] }) => {
+    let currentTotal = 0;
+    const relevantAsks = asks.slice(0, 15);
+    relevantAsks.reverse();
+    const asksWithTotal: [string, string, number][] = relevantAsks.map(([price, quantity]) => [price, quantity, currentTotal += Number(quantity)]);
+    const maxTotal = relevantAsks.reduce((acc, [_, quantity]) => acc + Number(quantity), 0);
+    asksWithTotal.reverse();
+
+    return <div>
+        {asksWithTotal.map(([price, quantity, total]) => <Ask maxTotal={maxTotal} key={price} price={price} quantity={quantity} total={total} />)}
+    </div>
+}
+function Ask({price, quantity, total, maxTotal}: {price: string, quantity: string, total: number, maxTotal: number}) {
+    return <div
+    style={{
+        display: "flex",
+        position: "relative",
+        width: "100%",
+        backgroundColor: "transparent",
+        overflow: "hidden",
+        marginBottom:4,
+        height:20
+        
+    }}
+>
+    <div
+        style={{
+        position: "absolute",
+        top: 0,
+        left: 0,
+        width: `${(100 * total) / maxTotal}%`,
+        height: "100%",
+        background: "rgba(228, 75, 68, 0.325)",
+        transition: "width 0.3s ease-in-out",
+        }}
+    ></div>
+    <div className="flex justify-between font-medium text-white text-sm w-full">
+        <div>
+            {price}
+        </div>
+        <div>
+            {Number(quantity).toFixed(2)}
+        </div>
+        <div className="text-red-800">
+            {total?.toFixed(2)}
+        </div>
+    </div>
+    </div>
+}
+
+// ================ .\frontend\app\components\depth\BidTable.tsx ================
+
+
+export const BidTable = ({ bids }: {bids: [string, string][]}) => {
+    let currentTotal = 0; 
+    const relevantBids = bids.slice(0, 15);
+    const bidsWithTotal: [string, string, number][] = relevantBids.map(([price, quantity]) => [price, quantity, currentTotal += Number(quantity)]);
+    const maxTotal = relevantBids.reduce((acc, [_, quantity]) => acc + Number(quantity), 0);
+
+    return <div>
+        {bidsWithTotal?.map(([price, quantity, total]) => <Bid maxTotal={maxTotal} total={total} key={price} price={price} quantity={quantity} />)}
+    </div>
+}
+
+function Bid({ price, quantity, total, maxTotal }: { price: string, quantity: string, total: number, maxTotal: number }) {
+    return (
+        <div
+            style={{
+                display: "flex",
+                position: "relative",
+                width: "100%",
+                backgroundColor: "transparent",
+                overflow: "hidden",
+                marginBottom:4,
+                height:20
+            }}
+        >
+        <div
+            style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            width: `${(100 * total) / maxTotal}%`,
+            height: "100%",
+            background: "rgba(1, 167, 129, 0.325)",
+            transition: "width 0.3s ease-in-out",
+            }}
+        ></div>
+            <div className={`flex text-white font-medium justify-between text-sm w-full`}>
+                <div>
+                    {price}
+                </div>
+                <div>
+                    {Number(quantity).toFixed(2)}
+                </div>
+                <div className="text-green-800">
+                    {total.toFixed(2)}
+                </div>
+            </div>
+        </div>
+    );
+}
+
+
+// ================ .\frontend\app\components\depth\Depth.tsx ================
+
+"use client";
+
+import { useEffect, useState } from "react";
+import { getDepth, getKlines, getTicker, getTrades } from "../../utils/httpClient";
+import { BidTable } from "./BidTable";
+import { AskTable } from "./AskTable";
+import { SignalingManager } from "../../utils/SignalingManager";
+
+export function Depth({ market }: {market: string}) {
+    const [bids, setBids] = useState<[string, string][]>();
+    const [asks, setAsks] = useState<[string, string][]>();
+    const [price, setPrice] = useState<string>();
+
+    useEffect(() => {
+        SignalingManager.getInstance().registerCallback("depth", (data: any) => {
+            console.log("depth has been updated");
+            console.log(data);
+            
+            setBids((originalBids) => {
+                const bidsAfterUpdate = [...(originalBids || [])];
+
+                for (let i = 0; i < bidsAfterUpdate.length; i++) {
+                    for (let j = 0; j < data.bids.length; j++)  {
+                        if (bidsAfterUpdate[i][0] === data.bids[j][0]) {
+                            bidsAfterUpdate[i][1] = data.bids[j][1];
+                            if (Number(bidsAfterUpdate[i][1]) === 0) {
+                                bidsAfterUpdate.splice(i, 1);
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                for (let j = 0; j < data.bids.length; j++)  {
+                    if (Number(data.bids[j][1]) !== 0 && !bidsAfterUpdate.map(x => x[0]).includes(data.bids[j][0])) {
+                        bidsAfterUpdate.push(data.bids[j]);
+                        break;
+                    }
+                }
+                bidsAfterUpdate.sort((x, y) => Number(y[0]) > Number(x[0]) ? -1 : 1);
+                return bidsAfterUpdate; 
+            });
+
+            setAsks((originalAsks) => {
+                const asksAfterUpdate = [...(originalAsks || [])];
+
+                for (let i = 0; i < asksAfterUpdate.length; i++) {
+                    for (let j = 0; j < data.asks.length; j++)  {
+                        if (asksAfterUpdate[i][0] === data.asks[j][0]) {
+                            asksAfterUpdate[i][1] = data.asks[j][1];
+                            if (Number(asksAfterUpdate[i][1]) === 0) {
+                                asksAfterUpdate.splice(i, 1);
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                for (let j = 0; j < data.asks.length; j++)  {
+                    if (Number(data.asks[j][1]) !== 0 && !asksAfterUpdate.map(x => x[0]).includes(data.asks[j][0])) {
+                        asksAfterUpdate.push(data.asks[j]);
+                        break;
+                    }
+                }
+                asksAfterUpdate.sort((x, y) => Number(y[0]) > Number(x[0]) ? 1 : -1);
+                return asksAfterUpdate; 
+            });
+        }, `DEPTH-${market}`);
+        
+        SignalingManager.getInstance().sendMessage({"method":"SUBSCRIBE","params":[`depth@${market}`]});
+
+        getDepth(market).then(d => {    
+            setBids(d.bids.reverse());
+            setAsks(d.asks);
+        });
+
+        getTicker(market).then(t => setPrice(t.lastPrice));
+        getTrades(market).then(t => setPrice(t[0].price));
+
+        return () => {
+            SignalingManager.getInstance().sendMessage({"method":"UNSUBSCRIBE","params":[`depth@${market}`]});
+            SignalingManager.getInstance().deRegisterCallback("depth", `DEPTH-${market}`);
+        }
+    }, [])
+    
+    return <div className="border border-slate-800 pr-3 pl-3">
+        <TableHeader />
+        {asks && <AskTable asks={asks} />}
+        {price && <div className="text-md">{price}</div>}
+        {bids && <BidTable bids={bids} />}
+    </div>
+}
+
+function TableHeader() {
+    return <div className="flex justify-between text-sm">
+    <div className="text-white text-2xl font-medium p-2">Price</div>
+    <div className="text-slate-500 text-2xl font-medium p-2">Size</div>
+    <div className="text-slate-500 text-2xl font-medium p-2">Total</div>
+</div>
+}
+
+// ================ .\frontend\app\markets\page.tsx ================
+
+import { Markets } from "../components/Markets";
+
+export default function Page() {
+    return  <main className="flex min-h-screen flex-col items-center justify-between p-24">
+    <Markets />
+  </main>
+}
+
+// ================ .\frontend\app\trade\[market]\page.tsx ================
+
+"use client";
+import { MarketBar } from "@/app/components/MarketBar";
+import { SwapUI } from "@/app/components/SwapUI";
+import { TradeView } from "@/app/components/TradeView";
+import { Depth } from "@/app/components/depth/Depth";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { useParams } from "next/navigation";
+
+export default function Page() {
+    const { market } = useParams();
+    return <div className="flex flex-row flex-1">
+        <div className="flex flex-col flex-1">
+            <MarketBar market={market as string} />
+            <div className="flex flex-row h-[920px] border-y border-slate-800">
+                <div className=" flex-1 ">
+                    <TradeView market={market as string} />
+                </div>
+                <div className="flex flex-col  h-1/2 w-1/4  overflow-auto pb-6  ">
+                <ScrollArea className="hide-scrollbar">
+                <Depth market={market as string} /> 
+                </ScrollArea>
+                    
+                </div>
+            </div>
+        </div>
+        <div className="w-[10px] flex-col border-slate-800 border-l"></div>
+        <div>
+            <div className="flex flex-col w-[250px]">
+                <SwapUI market={market as string} />
+            </div>
+        </div>
+    </div>
+}
+
+// ================ .\frontend\app\utils\ChartManager.ts ================
+
+import {
+  ColorType,
+  createChart as createLightWeightChart,
+  CrosshairMode,
+  ISeriesApi,
+  UTCTimestamp,
+} from "lightweight-charts";
+
+export class ChartManager {
+  private candleSeries: ISeriesApi<"Candlestick">;
+  private lastUpdateTime: number = 0;
+  private chart: any;
+  private currentBar: {
+    open: number | null;
+    high: number | null;
+    low: number | null;
+    close: number | null;
+  } = {
+    open: null,
+    high: null,
+    low: null,
+    close: null,
+  };
+
+  constructor(
+    ref: any,
+    initialData: any[],
+    layout: { background: string; color: string }
+  ) {
+    const chart = createLightWeightChart(ref, {
+      autoSize: true,
+      overlayPriceScales: {
+        ticksVisible: true,
+        borderVisible: true,
+      },
+      crosshair: {
+        mode: CrosshairMode.Normal,
+      },
+      rightPriceScale: {
+        visible: true,
+        ticksVisible: true,
+        entireTextOnly: true,
+      },
+      grid: {
+        horzLines: {
+          visible: false,
+        },
+        vertLines: {
+          visible: false,
+        },
+      },
+      layout: {
+        background: {
+          type: ColorType.Solid,
+          color: layout.background,
+        },
+        textColor: "white",
+      },
+    });
+    this.chart = chart;
+    this.candleSeries = chart.addCandlestickSeries();
+
+    this.candleSeries.setData(
+      initialData.map((data) => ({
+        ...data,
+        time: (data.timestamp / 1000) as UTCTimestamp,
+      }))
+    );
+  }
+  public update(updatedPrice: any) {
+    if (!this.lastUpdateTime) {
+      this.lastUpdateTime = new Date().getTime();
+    }
+
+    this.candleSeries.update({
+      time: (this.lastUpdateTime / 1000) as UTCTimestamp,
+      close: updatedPrice.close,
+      low: updatedPrice.low,
+      high: updatedPrice.high,
+      open: updatedPrice.open,
+    });
+
+    if (updatedPrice.newCandleInitiated) {
+      this.lastUpdateTime = updatedPrice.time;
+    }
+  }
+  public destroy() {
+    this.chart.remove();
+  }
+}
+
+
+// ================ .\frontend\app\utils\httpClient.ts ================
+
+import axios from "axios";
+import { Depth, KLine, Ticker, Trade } from "./types";
+
+// const BASE_URL = "https://exchange-proxy.100xdevs.com/api/v1";
+const BASE_URL = "http://localhost:3000/api/v1";
+
+export async function getTicker(market: string): Promise<Ticker> {
+    const tickers = await getTickers();
+    const ticker = tickers.find(t => t.symbol === market);
+    if (!ticker) {
+        throw new Error(`No ticker found for ${market}`);
+    }
+    return ticker;
+}
+
+export async function getTickers(): Promise<Ticker[]> {
+    const response = await axios.get(`${BASE_URL}/tickers`);
+    return response.data;
+}
+
+
+export async function getDepth(market: string): Promise<Depth> {
+    const response = await axios.get(`${BASE_URL}/depth?symbol=${market}`);
+    return response.data;
+}
+export async function getTrades(market: string): Promise<Trade[]> {
+    const response = await axios.get(`${BASE_URL}/trades?symbol=${market}`);
+    return response.data;
+}
+
+export async function getKlines(market: string, interval: string, startTime: number, endTime: number): Promise<KLine[]> {
+    const response = await axios.get(`${BASE_URL}/klines?symbol=${market}&interval=${interval}&startTime=${startTime}&endTime=${endTime}`);
+    const data: KLine[] = response.data;
+    return data.sort((x, y) => (Number(x.end) < Number(y.end) ? -1 : 1));
+}
+
+
+// ================ .\frontend\app\utils\SignalingManager.ts ================
+
+import { Ticker } from "./types";
+
+// export const BASE_URL = "wss://ws.backpack.exchange/"
+export const BASE_URL = "ws://localhost:3001"
+
+export class SignalingManager {
+    private ws: WebSocket;
+    private static instance: SignalingManager;
+    private bufferedMessages: any[] = [];
+    private callbacks: any = {};
+    private id: number;
+    private initialized: boolean = false;
+
+    private constructor() {
+        this.ws = new WebSocket(BASE_URL);
+        this.bufferedMessages = [];
+        this.id = 1;
+        this.init();
+    }
+
+    public static getInstance() {
+        if (!this.instance)  {
+            this.instance = new SignalingManager();
+        }
+        return this.instance;
+    }
+
+    init() {
+        this.ws.onopen = () => {
+            this.initialized = true;
+            this.bufferedMessages.forEach(message => {
+                this.ws.send(JSON.stringify(message));
+            });
+            this.bufferedMessages = [];
+        }
+        this.ws.onmessage = (event) => {
+            const message = JSON.parse(event.data);
+            const type = message.data.e;
+            if (this.callbacks[type]) {
+                this.callbacks[type].forEach(({ callback }) => {
+                    if (type === "ticker") {
+                        const newTicker: Partial<Ticker> = {
+                            lastPrice: message.data.c,
+                            high: message.data.h,
+                            low: message.data.l,
+                            volume: message.data.v,
+                            quoteVolume: message.data.V,
+                            symbol: message.data.s,
+                        }
+                        console.log(newTicker);
+                        callback(newTicker);
+                   }
+                   if (type === "depth") {
+                        // const newTicker: Partial<Ticker> = {
+                        //     lastPrice: message.data.c,
+                        //     high: message.data.h,
+                        //     low: message.data.l,
+                        //     volume: message.data.v,
+                        //     quoteVolume: message.data.V,
+                        //     symbol: message.data.s,
+                        // }
+                        // console.log(newTicker);
+                        // callback(newTicker);
+                        const updatedBids = message.data.b;
+                        const updatedAsks = message.data.a;
+                        callback({ bids: updatedBids, asks: updatedAsks });
+                    }
+                });
+            }
+        }
+    }
+
+    sendMessage(message: any) {
+        const messageToSend = {
+            ...message,
+            id: this.id++
+        }
+        if (!this.initialized) {
+            this.bufferedMessages.push(messageToSend);
+            return;
+        }
+        this.ws.send(JSON.stringify(messageToSend));
+    }
+
+    async registerCallback(type: string, callback: any, id: string) {
+        this.callbacks[type] = this.callbacks[type] || [];
+        this.callbacks[type].push({ callback, id });
+        // "ticker" => callback
+    }
+
+    async deRegisterCallback(type: string, id: string) {
+        if (this.callbacks[type]) {
+            const index = this.callbacks[type].findIndex(callback => callback.id === id);
+            if (index !== -1) {
+                this.callbacks[type].splice(index, 1);
+            }
+        }
+    }
+}
+
+// ================ .\frontend\app\utils\types.ts ================
+
+
+export interface KLine {
+    close: string;
+    end: string;
+    high: string;
+    low: string;
+    open: string;
+    quoteVolume: string;
+    start: string;
+    trades: string;
+    volume: string;
+}
+
+export interface Trade {
+    "id": number,
+    "isBuyerMaker": boolean,
+    "price": string,
+    "quantity": string,
+    "quoteQuantity": string,
+    "timestamp": number
+}
+
+export interface Depth {
+    bids: [string, string][],
+    asks: [string, string][],
+    lastUpdateId: string
+}
+
+export interface Ticker {
+    "firstPrice": string,
+    "high": string,
+    "lastPrice": string,
+    "low": string,
+    "priceChange": string,
+    "priceChangePercent": string,
+    "quoteVolume": string,
+    "symbol": string,
+    "trades": string,
+    "volume": string
+}
+
+// ================ .\frontend\app\utils\wsClient.ts ================
+
+
+
+// ================ .\frontend\components\ui\button.tsx ================
+
+import * as React from "react"
+import { Slot } from "@radix-ui/react-slot"
+import { cva, type VariantProps } from "class-variance-authority"
+
+import { cn } from "@/lib/utils"
+
+const buttonVariants = cva(
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+  {
+    variants: {
+      variant: {
+        default:
+          "bg-primary text-primary-foreground shadow hover:bg-primary/90",
+        destructive:
+          "bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90",
+        outline:
+          "border border-input bg-background shadow-sm hover:bg-accent hover:text-accent-foreground",
+        secondary:
+          "bg-secondary text-secondary-foreground shadow-sm hover:bg-secondary/80",
+        ghost: "hover:bg-accent hover:text-accent-foreground",
+        link: "text-primary underline-offset-4 hover:underline",
+      },
+      size: {
+        default: "h-9 px-4 py-2",
+        sm: "h-8 rounded-md px-3 text-xs",
+        lg: "h-10 rounded-md px-8",
+        icon: "h-9 w-9",
+      },
+    },
+    defaultVariants: {
+      variant: "default",
+      size: "default",
+    },
+  }
+)
+
+export interface ButtonProps
+  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
+    VariantProps<typeof buttonVariants> {
+  asChild?: boolean
+}
+
+const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
+  ({ className, variant, size, asChild = false, ...props }, ref) => {
+    const Comp = asChild ? Slot : "button"
+    return (
+      <Comp
+        className={cn(buttonVariants({ variant, size, className }))}
+        ref={ref}
+        {...props}
+      />
+    )
+  }
+)
+Button.displayName = "Button"
+
+export { Button, buttonVariants }
+
+
+// ================ .\frontend\components\ui\dropdown-menu.tsx ================
+
+"use client"
+
+import * as React from "react"
+import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu"
+import {
+  CheckIcon,
+  ChevronRightIcon,
+  DotFilledIcon,
+} from "@radix-ui/react-icons"
+
+import { cn } from "@/lib/utils"
+
+const DropdownMenu = DropdownMenuPrimitive.Root
+
+const DropdownMenuTrigger = DropdownMenuPrimitive.Trigger
+
+const DropdownMenuGroup = DropdownMenuPrimitive.Group
+
+const DropdownMenuPortal = DropdownMenuPrimitive.Portal
+
+const DropdownMenuSub = DropdownMenuPrimitive.Sub
+
+const DropdownMenuRadioGroup = DropdownMenuPrimitive.RadioGroup
+
+const DropdownMenuSubTrigger = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.SubTrigger>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.SubTrigger> & {
+    inset?: boolean
+  }
+>(({ className, inset, children, ...props }, ref) => (
+  <DropdownMenuPrimitive.SubTrigger
+    ref={ref}
+    className={cn(
+      "flex cursor-default gap-2 select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none focus:bg-accent data-[state=open]:bg-accent [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+      inset && "pl-8",
+      className
+    )}
+    {...props}
+  >
+    {children}
+    <ChevronRightIcon className="ml-auto" />
+  </DropdownMenuPrimitive.SubTrigger>
+))
+DropdownMenuSubTrigger.displayName =
+  DropdownMenuPrimitive.SubTrigger.displayName
+
+const DropdownMenuSubContent = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.SubContent>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.SubContent>
+>(({ className, ...props }, ref) => (
+  <DropdownMenuPrimitive.SubContent
+    ref={ref}
+    className={cn(
+      "z-50 min-w-[8rem] overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-lg data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",
+      className
+    )}
+    {...props}
+  />
+))
+DropdownMenuSubContent.displayName =
+  DropdownMenuPrimitive.SubContent.displayName
+
+const DropdownMenuContent = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Content>
+>(({ className, sideOffset = 4, ...props }, ref) => (
+  <DropdownMenuPrimitive.Portal>
+    <DropdownMenuPrimitive.Content
+      ref={ref}
+      sideOffset={sideOffset}
+      className={cn(
+        "z-50 min-w-[8rem] overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-md",
+        "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",
+        className
+      )}
+      {...props}
+    />
+  </DropdownMenuPrimitive.Portal>
+))
+DropdownMenuContent.displayName = DropdownMenuPrimitive.Content.displayName
+
+const DropdownMenuItem = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.Item>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Item> & {
+    inset?: boolean
+  }
+>(({ className, inset, ...props }, ref) => (
+  <DropdownMenuPrimitive.Item
+    ref={ref}
+    className={cn(
+      "relative flex cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&>svg]:size-4 [&>svg]:shrink-0",
+      inset && "pl-8",
+      className
+    )}
+    {...props}
+  />
+))
+DropdownMenuItem.displayName = DropdownMenuPrimitive.Item.displayName
+
+const DropdownMenuCheckboxItem = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.CheckboxItem>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.CheckboxItem>
+>(({ className, children, checked, ...props }, ref) => (
+  <DropdownMenuPrimitive.CheckboxItem
+    ref={ref}
+    className={cn(
+      "relative flex cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none transition-colors focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      className
+    )}
+    checked={checked}
+    {...props}
+  >
+    <span className="absolute left-2 flex h-3.5 w-3.5 items-center justify-center">
+      <DropdownMenuPrimitive.ItemIndicator>
+        <CheckIcon className="h-4 w-4" />
+      </DropdownMenuPrimitive.ItemIndicator>
+    </span>
+    {children}
+  </DropdownMenuPrimitive.CheckboxItem>
+))
+DropdownMenuCheckboxItem.displayName =
+  DropdownMenuPrimitive.CheckboxItem.displayName
+
+const DropdownMenuRadioItem = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.RadioItem>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.RadioItem>
+>(({ className, children, ...props }, ref) => (
+  <DropdownMenuPrimitive.RadioItem
+    ref={ref}
+    className={cn(
+      "relative flex cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none transition-colors focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      className
+    )}
+    {...props}
+  >
+    <span className="absolute left-2 flex h-3.5 w-3.5 items-center justify-center">
+      <DropdownMenuPrimitive.ItemIndicator>
+        <DotFilledIcon className="h-4 w-4 fill-current" />
+      </DropdownMenuPrimitive.ItemIndicator>
+    </span>
+    {children}
+  </DropdownMenuPrimitive.RadioItem>
+))
+DropdownMenuRadioItem.displayName = DropdownMenuPrimitive.RadioItem.displayName
+
+const DropdownMenuLabel = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.Label>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Label> & {
+    inset?: boolean
+  }
+>(({ className, inset, ...props }, ref) => (
+  <DropdownMenuPrimitive.Label
+    ref={ref}
+    className={cn(
+      "px-2 py-1.5 text-sm font-semibold",
+      inset && "pl-8",
+      className
+    )}
+    {...props}
+  />
+))
+DropdownMenuLabel.displayName = DropdownMenuPrimitive.Label.displayName
+
+const DropdownMenuSeparator = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.Separator>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Separator>
+>(({ className, ...props }, ref) => (
+  <DropdownMenuPrimitive.Separator
+    ref={ref}
+    className={cn("-mx-1 my-1 h-px bg-muted", className)}
+    {...props}
+  />
+))
+DropdownMenuSeparator.displayName = DropdownMenuPrimitive.Separator.displayName
+
+const DropdownMenuShortcut = ({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLSpanElement>) => {
+  return (
+    <span
+      className={cn("ml-auto text-xs tracking-widest opacity-60", className)}
+      {...props}
+    />
+  )
+}
+DropdownMenuShortcut.displayName = "DropdownMenuShortcut"
+
+export {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuCheckboxItem,
+  DropdownMenuRadioItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuShortcut,
+  DropdownMenuGroup,
+  DropdownMenuPortal,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuRadioGroup,
+}
+
+
+// ================ .\frontend\components\ui\scroll-area.tsx ================
+
+"use client"
+
+import * as React from "react"
+import * as ScrollAreaPrimitive from "@radix-ui/react-scroll-area"
+
+import { cn } from "@/lib/utils"
+
+const ScrollArea = React.forwardRef<
+  React.ElementRef<typeof ScrollAreaPrimitive.Root>,
+  React.ComponentPropsWithoutRef<typeof ScrollAreaPrimitive.Root>
+>(({ className, children, ...props }, ref) => (
+  <ScrollAreaPrimitive.Root
+    ref={ref}
+    className={cn("relative overflow-hidden", className)}
+    {...props}
+  >
+    <ScrollAreaPrimitive.Viewport className="h-full w-full rounded-[inherit]">
+      {children}
+    </ScrollAreaPrimitive.Viewport>
+    <ScrollBar />
+    <ScrollAreaPrimitive.Corner />
+  </ScrollAreaPrimitive.Root>
+))
+ScrollArea.displayName = ScrollAreaPrimitive.Root.displayName
+
+const ScrollBar = React.forwardRef<
+  React.ElementRef<typeof ScrollAreaPrimitive.ScrollAreaScrollbar>,
+  React.ComponentPropsWithoutRef<typeof ScrollAreaPrimitive.ScrollAreaScrollbar>
+>(({ className, orientation = "vertical", ...props }, ref) => (
+  <ScrollAreaPrimitive.ScrollAreaScrollbar
+    ref={ref}
+    orientation={orientation}
+    className={cn(
+      "flex touch-none select-none transition-colors",
+      orientation === "vertical" &&
+        "h-full w-2.5 border-l border-l-transparent p-[1px]",
+      orientation === "horizontal" &&
+        "h-2.5 flex-col border-t border-t-transparent p-[1px]",
+      className
+    )}
+    {...props}
+  >
+    <ScrollAreaPrimitive.ScrollAreaThumb className="relative flex-1 rounded-full bg-border" />
+  </ScrollAreaPrimitive.ScrollAreaScrollbar>
+))
+ScrollBar.displayName = ScrollAreaPrimitive.ScrollAreaScrollbar.displayName
+
+export { ScrollArea, ScrollBar }
+
+
+// ================ .\frontend\lib\utils.ts ================
+
+import { clsx, type ClassValue } from "clsx"
+import { twMerge } from "tailwind-merge"
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs))
+}
+
+
+// ================ .\mm\src\index.ts ================
+
+import axios from "axios";
+
+interface Order {
+    orderId: string;
+    market: string;
+    price: number;
+    quantity: number;
+    side: "buy" | "sell";
+    userId: string;
+}
+
+interface MarketConfig {
+    basePrice: number;
+    volatility: number;
+    minOrderCount: number;
+    maxOrderCount: number;
+    baseQuantity: number;
+    quantityVolatility: number;
+    priceDecimals: number;
+    quantityDecimals: number;
+    quantityUpdateInterval: number;  // milliseconds
+    orderCountUpdateInterval: number // milliseconds
+}
+
+const BASE_URL = "http://localhost:3000";
+const MARKET = "TATA_INR";
+const USER_ID = "5";
+
+const marketConfig: MarketConfig = {
+    basePrice: 177,
+    volatility: 0.002,
+    minOrderCount: 35,
+    maxOrderCount: 45,        // Increased max for more variation
+    baseQuantity: 5,
+    quantityVolatility: 0.8,
+    priceDecimals: 1,
+    quantityDecimals: 2,
+    quantityUpdateInterval: 3000,    // 3 seconds
+    orderCountUpdateInterval: 12000  // 12 seconds
+};
+
+class OrderBookSimulator {
+    private lastPrice: number;
+    private priceHistory: number[] = [];
+    private targetOrderCount: number;
+    private lastQuantityUpdate: number = Date.now();
+    private lastOrderCountUpdate: number = Date.now();
+    private quantityMultiplier: number = 1;
+    private marketTrend: number = 0; // -1: downtrend, 0: neutral, 1: uptrend
+
+    constructor(private config: MarketConfig) {
+        this.lastPrice = config.basePrice;
+        this.targetOrderCount = this.config.minOrderCount;
+        this.updateMarketTrend();
+    }
+
+    private updateMarketTrend() {
+        // Randomly change market trend every ~30 seconds
+        if (Math.random() < 0.03) {
+            this.marketTrend = Math.floor(Math.random() * 3) - 1;
+        }
+    }
+
+    private updateQuantityMultiplier() {
+        const now = Date.now();
+        if (now - this.lastQuantityUpdate >= this.config.quantityUpdateInterval) {
+            // More dramatic quantity changes
+            const baseChange = (Math.random() - 0.5) * 0.4; // ±20% change
+            const trendEffect = this.marketTrend * 0.1; // Market trend influence
+            this.quantityMultiplier = Math.max(0.5, Math.min(2, 
+                this.quantityMultiplier * (1 + baseChange + trendEffect)
+            ));
+            this.lastQuantityUpdate = now;
+        }
+    }
+
+    private updateTargetOrderCount() {
+        const now = Date.now();
+        if (now - this.lastOrderCountUpdate >= this.config.orderCountUpdateInterval) {
+            // More variation in order count
+            const range = this.config.maxOrderCount - this.config.minOrderCount;
+            const randomFactor = Math.pow(Math.random(), 2); // Bias towards lower numbers
+            this.targetOrderCount = Math.floor(
+                this.config.minOrderCount + range * randomFactor
+            );
+            this.lastOrderCountUpdate = now;
+        }
+    }
+
+    private generateQuantity(priceLevel: number): number {
+        this.updateQuantityMultiplier();
+        
+        // Base quantity with level decay
+        const levelFactor = Math.exp(-priceLevel * 0.08);
+        
+        // Time-based waves (faster cycles)
+        const timeFactor = (
+            Math.sin(Date.now() / 5000) * 0.3 + 
+            Math.sin(Date.now() / 12000) * 0.2 +
+            1
+        );
+        
+        // More volatile random factor
+        const randomFactor = Math.pow(Math.random(), 0.5) * 1.5;
+        
+        // Apply current market trend
+        const trendFactor = 1 + (this.marketTrend * 0.1);
+        
+        const quantity = this.config.baseQuantity * 
+            levelFactor * 
+            timeFactor * 
+            randomFactor * 
+            this.quantityMultiplier *
+            trendFactor;
+        
+        return Number(Math.max(0.1, quantity).toFixed(this.config.quantityDecimals));
+    }
+
+    private calculatePriceLevel(basePrice: number, level: number, side: "buy" | "sell"): number {
+        const direction = side === "buy" ? -1 : 1;
+        
+        // Dynamic price steps based on market trend
+        const trendFactor = 1 + (this.marketTrend * direction * 0.1);
+        
+        let priceStep: number;
+        if (level < 10) {
+            priceStep = basePrice * 0.0001 * (level + 1) * trendFactor;
+        } else if (level < 20) {
+            priceStep = basePrice * 0.0002 * (level + 1) * trendFactor;
+        } else {
+            priceStep = basePrice * 0.0003 * (level + 1) * trendFactor;
+        }
+        
+        return Number((basePrice + direction * priceStep).toFixed(this.config.priceDecimals));
+    }
+
+    private shouldCancelOrder(order: Order, currentPrice: number, totalOrders: number): boolean {
+        if (totalOrders <= this.config.minOrderCount) {
+            return false;
+        }
+
+        const priceDeviation = Math.abs(order.price - currentPrice) / currentPrice;
+        
+        // Time-based cancellation (more frequent)
+        const timeBased = Math.random() < 0.05;
+        
+        // Distance-based cancellation
+        const distanceBased = priceDeviation > 0.08;
+        
+        // Count-based cancellation
+        const countBased = totalOrders > this.targetOrderCount && Math.random() < 0.15;
+        
+        // Trend-based cancellation
+        const trendBased = (this.marketTrend === 1 && order.side === "sell" && Math.random() < 0.1) ||
+                          (this.marketTrend === -1 && order.side === "buy" && Math.random() < 0.1);
+        
+        return timeBased || distanceBased || countBased || trendBased;
+    }
+
+    async simulateOrderBook() {
+        try {
+            this.updateMarketTrend();
+            this.updateTargetOrderCount();
+            const currentPrice = this.updatePrice();
+
+            const response = await axios.get(`${BASE_URL}/api/v1/order/open?userId=${USER_ID}&market=${MARKET}`);
+            const openOrders: Order[] = response.data;
+
+            const bids = openOrders.filter(o => o.side === "buy");
+            const asks = openOrders.filter(o => o.side === "sell");
+
+            const cancelPromises: Promise<any>[] = openOrders
+                .filter(order => this.shouldCancelOrder(order, currentPrice, 
+                    order.side === "buy" ? bids.length : asks.length))
+                .map(order => 
+                    axios.delete(`${BASE_URL}/api/v1/order`, {
+                        data: { orderId: order.orderId, market: MARKET }
+                    })
+                );
+
+            await Promise.all(cancelPromises);
+
+            const requiredBids = Math.max(0, this.targetOrderCount - bids.length);
+            const requiredAsks = Math.max(0, this.targetOrderCount - asks.length);
+
+            const newOrderPromises: Promise<any>[] = [];
+
+            for (let i = 0; i < Math.max(requiredBids, requiredAsks); i++) {
+                if (i < requiredBids) {
+                    const price = this.calculatePriceLevel(currentPrice, i, "buy");
+                    newOrderPromises.push(
+                        axios.post(`${BASE_URL}/api/v1/order`, {
+                            market: MARKET,
+                            price: price.toString(),
+                            quantity: this.generateQuantity(i).toString(),
+                            side: "buy",
+                            userId: USER_ID
+                        })
+                    );
+                }
+
+                if (i < requiredAsks) {
+                    const price = this.calculatePriceLevel(currentPrice, i, "sell");
+                    newOrderPromises.push(
+                        axios.post(`${BASE_URL}/api/v1/order`, {
+                            market: MARKET,
+                            price: price.toString(),
+                            quantity: this.generateQuantity(i).toString(),
+                            side: "sell",
+                            userId: USER_ID
+                        })
+                    );
+                }
+            }
+
+            await Promise.all(newOrderPromises);
+
+            // Shorter update interval for more frequent changes
+            const nextUpdateTime = 500 + Math.random() * 300;
+            await new Promise(resolve => setTimeout(resolve, nextUpdateTime));
+            this.simulateOrderBook();
+
+        } catch (error) {
+            console.error("Error in order book simulation:", error);
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            this.simulateOrderBook();
+        }
+    }
+
+    private updatePrice(): number {
+        const trendEffect = this.marketTrend * this.config.volatility;
+        const randomFactor = (Math.random() - 0.5) * 2;
+        const meanReversion = (this.config.basePrice - this.lastPrice) * 0.1;
+        const priceChange = (this.lastPrice * this.config.volatility * randomFactor) + 
+                           meanReversion + trendEffect;
+        
+        this.lastPrice = Math.max(0, this.lastPrice + priceChange);
+        this.priceHistory.push(this.lastPrice);
+        if (this.priceHistory.length > 100) this.priceHistory.shift();
+        
+        return this.lastPrice;
+    }
+}
+
+// Start the simulation
+const simulator = new OrderBookSimulator(marketConfig);
+simulator.simulateOrderBook();
+
+// ================ .\ws\src\index.ts ================
+
+import { WebSocketServer } from "ws";
+import { UserManager } from "./UserManager";
+
+const wss = new WebSocketServer({ port: 3001 });
+
+wss.on("connection", (ws) => {
+    UserManager.getInstance().addUser(ws);
+});
+
+
+
+// ================ .\ws\src\SubscriptionManager.ts ================
+
+import { RedisClientType, createClient } from "redis";
+import { UserManager } from "./UserManager";
+
+export class SubscriptionManager {
+    private static instance: SubscriptionManager;
+    private subscriptions: Map<string, string[]> = new Map();
+    private reverseSubscriptions: Map<string, string[]> = new Map();
+    private redisClient: RedisClientType;
+
+    private constructor() {
+        this.redisClient = createClient();
+        this.redisClient.connect();
+    }
+
+    public static getInstance() {
+        if (!this.instance)  {
+            this.instance = new SubscriptionManager();
+        }
+        return this.instance;
+    }
+
+    public subscribe(userId: string, subscription: string) {
+        if (this.subscriptions.get(userId)?.includes(subscription)) {
+            return
+        }
+
+        this.subscriptions.set(userId, (this.subscriptions.get(userId) || []).concat(subscription));
+        this.reverseSubscriptions.set(subscription, (this.reverseSubscriptions.get(subscription) || []).concat(userId));
+        if (this.reverseSubscriptions.get(subscription)?.length === 1) {
+
+            this.redisClient.subscribe(subscription, this.redisCallbackHandler);
+        }
+    }
+
+    private redisCallbackHandler = (message: string, channel: string) => {
+        const parsedMessage = JSON.parse(message);
+        this.reverseSubscriptions.get(channel)?.forEach(s => UserManager.getInstance().getUser(s)?.emit(parsedMessage));
+    }
+
+    public unsubscribe(userId: string, subscription: string) {
+        const subscriptions = this.subscriptions.get(userId);
+        if (subscriptions) {
+            this.subscriptions.set(userId, subscriptions.filter(s => s !== subscription));
+        }
+        const reverseSubscriptions = this.reverseSubscriptions.get(subscription);
+        if (reverseSubscriptions) {
+            this.reverseSubscriptions.set(subscription, reverseSubscriptions.filter(s => s !== userId));
+            if (this.reverseSubscriptions.get(subscription)?.length === 0) {
+                this.reverseSubscriptions.delete(subscription);
+                this.redisClient.unsubscribe(subscription);
+            }
+        }
+    }
+
+    public userLeft(userId: string) {
+        console.log("user left " + userId);
+        this.subscriptions.get(userId)?.forEach(s => this.unsubscribe(userId, s));
+    }
+    
+    getSubscriptions(userId: string) {
+        return this.subscriptions.get(userId) || [];
+    }
+}
+
+// ================ .\ws\src\User.ts ================
+
+import { WebSocket } from "ws";
+import { OutgoingMessage } from "./types/out";
+import { SubscriptionManager } from "./SubscriptionManager";
+import { IncomingMessage, SUBSCRIBE, UNSUBSCRIBE } from "./types/in";
+
+export class User {
+    private id: string;
+    private ws: WebSocket;
+
+    constructor(id: string, ws: WebSocket) {
+        this.id = id;
+        this.ws = ws;
+        this.addListeners();
+    }
+
+    private subscriptions: string[] = [];
+
+    public subscribe(subscription: string) {
+        this.subscriptions.push(subscription);
+    }
+
+    public unsubscribe(subscription: string) {
+        this.subscriptions = this.subscriptions.filter(s => s !== subscription);
+    }
+
+    emit(message: OutgoingMessage) {
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private addListeners() {
+        this.ws.on("message", (message: string) => {
+            const parsedMessage: IncomingMessage = JSON.parse(message);
+            if (parsedMessage.method === SUBSCRIBE) {
+                parsedMessage.params.forEach(s => SubscriptionManager.getInstance().subscribe(this.id, s));
+            }
+
+            if (parsedMessage.method === UNSUBSCRIBE) {
+                parsedMessage.params.forEach(s => SubscriptionManager.getInstance().unsubscribe(this.id, parsedMessage.params[0]));
+            }
+        });
+    }
+
+}
+
+// ================ .\ws\src\UserManager.ts ================
+
+import { WebSocket } from "ws";
+import { User } from "./User";
+import { SubscriptionManager } from "./SubscriptionManager";
+
+export class UserManager {
+    private static instance: UserManager;
+    private users: Map<string, User> = new Map();
+
+    private constructor() {
+        
+    }
+
+    public static getInstance() {
+        if (!this.instance)  {
+            this.instance = new UserManager();
+        }
+        return this.instance;
+    }
+
+    public addUser(ws: WebSocket) {
+        const id = this.getRandomId();
+        const user = new User(id, ws);
+        this.users.set(id, user);
+        this.registerOnClose(ws, id);
+        return user;
+    }
+
+    private registerOnClose(ws: WebSocket, id: string) {
+        ws.on("close", () => {
+            this.users.delete(id);
+            SubscriptionManager.getInstance().userLeft(id);
+        });
+    }
+
+    public getUser(id: string) {
+        return this.users.get(id);
+    }
+
+    private getRandomId() {
+        return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+    }
+}
+
+// ================ .\ws\src\types\in.ts ================
+
+
+export const SUBSCRIBE = "SUBSCRIBE";
+export const UNSUBSCRIBE = "UNSUBSCRIBE";
+
+export type SubscribeMessage = {
+    method: typeof SUBSCRIBE,
+    params: string[]
+}
+
+export type UnsubscribeMessage = {
+    method: typeof UNSUBSCRIBE,
+    params: string[]
+}
+
+export type IncomingMessage = SubscribeMessage | UnsubscribeMessage;
+
+// ================ .\ws\src\types\out.ts ================
+
+
+
+export type TickerUpdateMessage = {
+    type: "ticker",
+    data: {
+        c?: string,
+        h?: string,
+        l?: string,
+        v?: string,
+        V?: string,
+        s?: string,
+        id: number,
+        e: "ticker"
+    }
+} 
+
+export type DepthUpdateMessage = {
+    type: "depth",
+    data: {
+        b?: [string, string][],
+        a?: [string, string][],
+        id: number,
+        e: "depth"
+    }
+}
+
+export type OutgoingMessage = TickerUpdateMessage | DepthUpdateMessage;

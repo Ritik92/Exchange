@@ -1,10 +1,19 @@
 "use client";
 import { useState } from "react";
+import { buy, sell } from "../utils/httpClient";
 export function SwapUI({ market }: {market: string}) {
-    const [amount, setAmount] = useState('');
+    const [price, setPrice] = useState('');
+    const [quantity, setQuantity] = useState('');
     const [activeTab, setActiveTab] = useState('buy');
     const [type, setType] = useState('limit');
-
+    async function handleBuy(){
+        const res=await buy(price,quantity)
+        if(res) console.log(res)
+    }
+    async function handleSell(){
+        const res=await sell(price,quantity)
+        if(res) console.log(res)
+    }
     return <div>
         <div className="flex flex-col">
             <div className="flex flex-row h-[60px]">
@@ -31,7 +40,7 @@ export function SwapUI({ market }: {market: string}) {
                                 Price
                             </p>
                             <div className="flex flex-col relative">
-                                <input step="0.01" placeholder="0" className="h-12 rounded-lg border-2 border-solid border-baseBorderLight bg-[var(--background)] pr-12 text-right text-2xl leading-9 text-[$text] placeholder-baseTextMedEmphasis ring-0 transition focus:border-accentBlue focus:ring-0" type="text" value="134.38" />
+                                <input onChange={(e)=>setPrice(e.target.value)} step="0.01" placeholder="0" className="h-12 rounded-lg border-2 border-solid border-baseBorderLight bg-[var(--background)] pr-12 text-right text-2xl leading-9 text-[$text] placeholder-baseTextMedEmphasis ring-0 transition focus:border-accentBlue focus:ring-0" type="text"  />
                                 <div className="flex flex-row absolute right-1 top-1 p-2">
                                     <div className="relative">
                                         <img src="https://backpack.exchange/_next/image?url=%2Fcoins%2Fusdc.png&w=48&q=75" className="w-6 h-6" />
@@ -45,7 +54,7 @@ export function SwapUI({ market }: {market: string}) {
                             Quantity
                         </p>
                         <div className="flex flex-col relative">
-                            <input step="0.01" placeholder="0" className="h-12 rounded-lg border-2 border-solid border-baseBorderLight bg-[var(--background)] pr-12 text-right text-2xl leading-9 text-[$text] placeholder-baseTextMedEmphasis ring-0 transition focus:border-accentBlue focus:ring-0" type="text" value="123" />
+                            <input onChange={(e)=>setQuantity(e.target.value)} step="0.01" placeholder="0" className="h-12 rounded-lg border-2 border-solid border-baseBorderLight bg-[var(--background)] pr-12 text-right text-2xl leading-9 text-[$text] placeholder-baseTextMedEmphasis ring-0 transition focus:border-accentBlue focus:ring-0" type="text" />
                             <div className="flex flex-row absolute right-1 top-1 p-2">
                                 <div className="relative">
                                     <img src="https://backpack.exchange/_next/image?url=%2Fcoins%2Fsol.png&w=48&q=75" className="w-6 h-6" />
@@ -70,7 +79,7 @@ export function SwapUI({ market }: {market: string}) {
                             </div>
                         </div>
                     </div>
-                    {activeTab=='buy'? <button type="button" className="font-semibold  focus:ring-blue-200 focus:none focus:outline-none text-center h-12 rounded-xl text-base px-4 py-2 my-4 bg-greenPrimaryButtonBackground text-greenPrimaryButtonText active:scale-98" data-rac="">Buy</button>: <button type="button" className="font-semibold  focus:ring-blue-200 focus:none focus:outline-none text-center h-12 rounded-xl text-base px-4 py-2 my-4 bg-red-500 text-greenPrimaryButtonText active:scale-98" data-rac="">Sell</button>}
+                    {activeTab=='buy'? <button onClick={handleBuy}  type="button" className="font-semibold  focus:ring-blue-200 focus:none focus:outline-none text-center h-12 rounded-xl text-base px-4 py-2 my-4 bg-greenPrimaryButtonBackground text-greenPrimaryButtonText active:scale-98" data-rac="" >Buy</button>: <button onClick={handleSell} type="button" className="font-semibold  focus:ring-blue-200 focus:none focus:outline-none text-center h-12 rounded-xl text-base px-4 py-2 my-4 bg-red-500 text-greenPrimaryButtonText active:scale-98" data-rac="">Sell</button>}
                    
                     <div className="flex justify-between flex-row mt-1">
                         <div className="flex flex-row gap-2">
@@ -79,7 +88,7 @@ export function SwapUI({ market }: {market: string}) {
                                 <label className="ml-2 text-xs">Post Only</label>
                             </div>
                             <div className="flex items-center">
-                                <input className="form-checkbox rounded border border-solid border-baseBorderMed bg-base-950 font-light text-transparent shadow-none shadow-transparent outline-none ring-0 ring-transparent checked:border-baseBorderMed checked:bg-base-900 checked:hover:border-baseBorderMed focus:bg-base-900 focus:ring-0 focus:ring-offset-0 focus:checked:border-baseBorderMed cursor-pointer h-5 w-5" id="ioc" type="checkbox" data-rac="" />
+                                <input  className="form-checkbox rounded border border-solid border-baseBorderMed bg-base-950 font-light text-transparent shadow-none shadow-transparent outline-none ring-0 ring-transparent checked:border-baseBorderMed checked:bg-base-900 checked:hover:border-baseBorderMed focus:bg-base-900 focus:ring-0 focus:ring-offset-0 focus:checked:border-baseBorderMed cursor-pointer h-5 w-5" id="ioc" type="checkbox" data-rac="" />
                                 <label className="ml-2 text-xs">IOC</label>
                             </div>
                         </div>

@@ -27,16 +27,16 @@ const MARKET = "TATA_INR";
 const USER_ID = "5";
 
 const marketConfig: MarketConfig = {
-    basePrice: 177,
+    basePrice: 194,
     volatility: 0.002,
-    minOrderCount: 35,
-    maxOrderCount: 45,        // Increased max for more variation
+    minOrderCount: 60,
+    maxOrderCount: 100,        // Increased max for more variation
     baseQuantity: 5,
     quantityVolatility: 0.8,
     priceDecimals: 1,
     quantityDecimals: 2,
-    quantityUpdateInterval: 3000,    // 3 seconds
-    orderCountUpdateInterval: 12000  // 12 seconds
+    quantityUpdateInterval: 1000,    // 3 seconds
+    orderCountUpdateInterval: 3000  // 12 seconds
 };
 
 class OrderBookSimulator {

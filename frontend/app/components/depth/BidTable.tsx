@@ -19,7 +19,7 @@ function Bid({ price, quantity, total, maxTotal }: { price: string, quantity: st
                 width: "100%",
                 backgroundColor: "transparent",
                 overflow: "hidden",
-                marginBottom:4,
+                marginBottom:2,
                 height:20
             }}
         >
