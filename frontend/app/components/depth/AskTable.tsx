@@ -1,16 +1,16 @@
 
-export const AskTable = ({ asks }: { asks: [string, string][] }) => {
-    let currentTotal = 0;
-    const relevantAsks = asks.slice(0, 15);
-    relevantAsks.reverse();
-    const asksWithTotal: [string, string, number][] = relevantAsks.map(([price, quantity]) => [price, quantity, currentTotal += Number(quantity)]);
-    const maxTotal = relevantAsks.reduce((acc, [_, quantity]) => acc + Number(quantity), 0);
-    asksWithTotal.reverse();
+    export const AskTable = ({ asks }: { asks: [string, string][] }) => {
+        let currentTotal = 0;
+        const relevantAsks = asks.slice(0, 15);
+        relevantAsks.reverse();
+        const asksWithTotal: [string, string, number][] = relevantAsks.map(([price, quantity]) => [price, quantity, currentTotal += Number(quantity)]);
+        const maxTotal = relevantAsks.reduce((acc, [_, quantity]) => acc + Number(quantity), 0);
+        asksWithTotal.reverse();
 
-    return <div>
-        {asksWithTotal.map(([price, quantity, total]) => <Ask maxTotal={maxTotal} key={price} price={price} quantity={quantity} total={total} />)}
-    </div>
-}
+        return <div>
+            {asksWithTotal.map(([price, quantity, total]) => <Ask maxTotal={maxTotal} key={price} price={price} quantity={quantity} total={total} />)}
+        </div>
+    }
 function Ask({price, quantity, total, maxTotal}: {price: string, quantity: string, total: number, maxTotal: number}) {
     return <div
     style={{
@@ -35,14 +35,14 @@ function Ask({price, quantity, total, maxTotal}: {price: string, quantity: strin
         transition: "width 0.3s ease-in-out",
         }}
     ></div>
-    <div className="flex justify-between font-medium text-white text-sm w-full">
+    <div className="flex justify-between font-medium text-white text-2xl w-full">
         <div>
             {price}
         </div>
         <div>
             {Number(quantity).toFixed(2)}
         </div>
-        <div className="text-red-800">
+        <div className="text-red-600">
             {total?.toFixed(2)}
         </div>
     </div>

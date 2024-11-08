@@ -43,26 +43,7 @@ export function TradeView({
   const fetchHistoricalData = async (timeframe: string) => {
     // Simulate API call - replace with actual API call
     return [
-        {
-            "time_period_start": "2024-11-01T00:00:00.0000000Z",
-            "time_period_end": "0001-01-01T00:00:00.0000000Z",
-            "time_open": "2024-11-01T00:00:00.2000000Z",
-            "time_close": "2024-11-01T00:59:44.9000000Z",
-            "rate_open": 168.47119952713967,
-            "rate_high": 169.03450524093276,
-            "rate_low": 168.11281598746157,
-            "rate_close": 168.86816973767426
-        },
-        {
-            "time_period_start": "2024-11-01T01:00:00.0000000Z",
-            "time_period_end": "0001-01-01T00:00:00.0000000Z",
-            "time_open": "2024-11-01T01:00:30.6000000Z",
-            "time_close": "2024-11-01T01:59:59.9000000Z",
-            "rate_open": 168.83704690696072,
-            "rate_high": 169.20722148521875,
-            "rate_low": 166.2774119023664,
-            "rate_close": 166.9616059097984
-        },
+       
         {
             "time_period_start": "2024-11-01T02:00:00.0000000Z",
             "time_period_end": "0001-01-01T00:00:00.0000000Z",
@@ -1783,7 +1764,7 @@ export function TradeView({
   }, [market]);
 
   return (
-    <Card className="bg-background p-4 rounded-lg">
+    <Card className="bg-background  p-4 rounded-lg bg-[#14151B]">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center space-x-2">
           <LineChart className="w-5 h-5 text-muted-foreground" />

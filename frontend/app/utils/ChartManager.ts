@@ -30,7 +30,7 @@ export class ChartManager {
   ) {
     // Set default options for dark theme
     const defaultOptions = {
-      background: '#131722',
+      background: '#14151B',
       textColor: '#D9D9D9',
       gridColor: '#363c4e',
       upColor: '#26a69a',

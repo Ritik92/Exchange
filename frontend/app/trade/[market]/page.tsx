@@ -11,11 +11,11 @@ export default function Page() {
     return <div className="flex flex-row flex-1">
         <div className="flex flex-col flex-1">
             <MarketBar market={market as string} />
-            <div className="flex flex-row h-[920px] border-y border-slate-800">
-                <div className=" flex-1  ">
+            <div className="flex flex-row h-[920px] ">
+                <div className=" flex-1 pl-4  ">
                     <TradeView market={market as string} />
                 </div>
-                <div className="flex flex-col  h-[580px] w-1/4  overflow-auto   ">
+                <div className="flex flex-col  h-[580px] w-1/4 pl-4 overflow-auto   ">
                 <ScrollArea className="hide-scrollbar">
                 <Depth market={market as string} /> 
                 </ScrollArea>
@@ -23,9 +23,9 @@ export default function Page() {
                 </div>
             </div>
         </div>
-        <div className="w-[10px] flex-col border-slate-800 border-l"></div>
+        <div className="w-[10px] flex-col "></div>
         <div>
-            <div className="flex flex-col w-[250px]">
+            <div className="flex flex-col w-[250px] pr-4">
                 <SwapUI market={market as string} />
             </div>
         </div>
